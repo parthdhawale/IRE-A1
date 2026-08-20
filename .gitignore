@@ -1,0 +1,49 @@
+# ── Data (never commit raw or large files) ────────────────────────────────────
+data/
+predictions/*.txt
+predictions/*.tsv
+predictions/*.parquet
+
+# ── Archives & model weights ──────────────────────────────────────────────────
+*.zip
+*.gz
+*.tar
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Logs & temp ───────────────────────────────────────────────────────────────
+*.log
+tmp/
+temp/

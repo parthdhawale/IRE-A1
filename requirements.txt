@@ -1,0 +1,27 @@
+# Core data science
+pandas>=2.0
+polars>=0.20
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.3
+pyarrow>=14.0
+
+# Retrieval
+rank-bm25>=0.2.2
+faiss-cpu>=1.7.4            # use faiss-gpu on Colab/Kaggle
+
+# Embeddings / NLP
+sentence-transformers>=2.6
+transformers>=4.38
+torch>=2.1
+
+# HuggingFace datasets
+huggingface_hub>=0.21
+datasets>=2.18
+
+# Progress & utilities
+tqdm>=4.66
+requests>=2.31
+
+# Testing
+pytest>=8.0
