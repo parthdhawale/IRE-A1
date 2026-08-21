@@ -46,11 +46,17 @@ def main():
         action="store_true",
         help="Skip download step (use if raw files already present)",
     )
+    parser.add_argument(
+        "--large",
+        action="store_true",
+        help="Download the large/test datasets (~6GB total) for final Codabench submission",
+    )
     args = parser.parse_args()
 
     log.info("A1 Pipeline: starting end-to-end build")
     log.info(f"  Dataset  : {args.dataset}")
-    log.info(f"  Skip DL  : {args.skip_download}\n")
+    log.info(f"  Skip DL  : {args.skip_download}")
+    log.info(f"  Large    : {args.large}\n")
 
     from src.pipeline.download import download_all
     from src.pipeline.preprocess import preprocess_all
@@ -58,7 +64,7 @@ def main():
     from src.pipeline.feature_store import build_feature_store
 
     if not args.skip_download:
-        run_step("Download raw data", download_all, dataset=args.dataset)
+        run_step("Download raw data", download_all, dataset=args.dataset, include_large=args.large)
 
     run_step("Preprocess → unified schema", preprocess_all, dataset=args.dataset)
     run_step("Temporal train/val/test split", split_all, dataset=args.dataset)
