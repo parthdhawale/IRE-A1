@@ -31,23 +31,15 @@ EBNERD_PROC_DIR = Path("data/ebnerd/processed")
 # ── Article feature store ─────────────────────────────────────────────────────
 
 def build_article_store(proc_dir: Path):
-    """Deduplicate articles from all available splits and save."""
-    parts = []
-    for fname in ["articles_train.parquet", "articles_dev.parquet",
-                  "articles_validation.parquet", "articles_test.parquet"]:
-        p = proc_dir / fname
-        if p.exists():
-            parts.append(pd.read_parquet(p))
+    """Load the combined articles.parquet (already saved by preprocess_all)."""
+    combined_path = proc_dir / "articles.parquet"
+    if combined_path.exists():
+        articles = pd.read_parquet(combined_path)
+        log.info(f"  Article store: {len(articles):,} unique articles from {combined_path}")
+        return articles
 
-    if not parts:
-        log.warning(f"  No article parquet files found in {proc_dir}, skipping.")
-        return
-
-    articles = pd.concat(parts, ignore_index=True).drop_duplicates("article_id")
-    articles = articles.reset_index(drop=True)
-    articles.to_parquet(proc_dir / "articles.parquet", index=False)
-    log.info(f"  Article store: {len(articles):,} unique articles → {proc_dir}/articles.parquet")
-    return articles
+    log.warning(f"  No articles.parquet found in {proc_dir}, skipping.")
+    return None
 
 
 def build_embedding_index(proc_dir: Path, articles: pd.DataFrame):
@@ -97,20 +89,44 @@ def build_user_store(proc_dir: Path):
         log.warning(f"  train.parquet not found in {proc_dir}, skipping user store.")
         return
 
-    train = pd.read_parquet(train_path)
+    # Aggregate click history per user across all training impressions.
+    # click_history in each row already contains history before that impression;
+    # the most recent (last) impression's history per user is the final history.
+    #
+    # This scans row-group batches manually via pyarrow instead of a Polars
+    # lazy/streaming groupby: on this machine, Polars' streaming engine's
+    # internal scratch memory reliably got the process killed (exit 137) even
+    # after switching away from a full-table sort, because only ~5-6GB RAM was
+    # actually free (other apps were using the rest of the 16GB). A manual
+    # reduction into a plain dict has a small, predictable footprint — roughly
+    # one (timestamp, click_history) pair per unique user, nothing more.
+    import pyarrow.parquet as pq
+    from tqdm import tqdm
 
-    # Aggregate click history per user across all training impressions
-    # click_history in each row already contains history before that impression
-    # Use the most recent (last) impression's history per user as final history
+    log.info(f"  Aggregating per-user click history from {train_path}...")
+    pf = pq.ParquetFile(train_path)
+    total_rows = pf.metadata.num_rows
+    latest: dict[str, tuple] = {}  # user_id -> (timestamp, click_history)
+
+    with tqdm(total=total_rows, desc="  Scanning train for user history", ncols=80) as bar:
+        for batch in pf.iter_batches(columns=["user_id", "timestamp", "click_history"], batch_size=200_000):
+            for user_id, ts, history in zip(
+                batch.column("user_id").to_pylist(),
+                batch.column("timestamp").to_pylist(),
+                batch.column("click_history").to_pylist(),
+            ):
+                prev = latest.get(user_id)
+                if prev is None or ts > prev[0]:
+                    latest[user_id] = (ts, history)
+            bar.update(batch.num_rows)
+
     user_rows = []
-    for user_id, group in train.sort_values("timestamp").groupby("user_id"):
-        last_row = group.iloc[-1]
-        history = last_row["click_history"] if isinstance(last_row["click_history"], list) else []
-        weights = _recency_weights(history)
+    for user_id, (_, history) in latest.items():
+        history = history or []
         user_rows.append({
             "user_id": user_id,
             "click_history": history,
-            "recency_weights": weights,
+            "recency_weights": _recency_weights(history),
             "n_clicks": len(history),
         })
 
@@ -123,13 +139,13 @@ def build_user_store(proc_dir: Path):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def build_feature_store(dataset: str = "both"):
-    for name, proc_dir in [("MIND", MIND_PROC_DIR), ("EB-NeRD", EBNERD_PROC_DIR)]:
-        if dataset not in ("both", name.lower().replace("-", "")):
-            # allow 'mind' and 'ebnerd' as shortcuts
-            if not (dataset == "mind" and name == "MIND") and \
-               not (dataset == "ebnerd" and name == "EB-NeRD"):
-                continue
+    datasets_to_build = []
+    if dataset in ("both", "mind"):
+        datasets_to_build.append(("MIND", MIND_PROC_DIR))
+    if dataset in ("both", "ebnerd"):
+        datasets_to_build.append(("EB-NeRD", EBNERD_PROC_DIR))
 
+    for name, proc_dir in datasets_to_build:
         log.info(f"Building feature store for {name}...")
         proc_dir.mkdir(parents=True, exist_ok=True)
         articles = build_article_store(proc_dir)
@@ -155,4 +171,16 @@ def load_embeddings(dataset: str) -> tuple[np.ndarray, dict]:
 
 def load_split(dataset: str, split: str) -> pd.DataFrame:
     proc_dir = MIND_PROC_DIR if dataset == "mind" else EBNERD_PROC_DIR
-    return pd.read_parquet(proc_dir / f"{split}.parquet")
+    path = proc_dir / f"{split}.parquet"
+    if not path.exists():
+        # Try alternate names: val→validation, dev→val, impressions_X
+        alternates = [
+            proc_dir / f"impressions_{split}.parquet",
+            proc_dir / f"impressions_{'dev' if split == 'val' else split}.parquet",
+            proc_dir / f"impressions_{'validation' if split == 'val' else split}.parquet",
+        ]
+        for alt in alternates:
+            if alt.exists():
+                path = alt
+                break
+    return pd.read_parquet(path)

@@ -96,7 +96,11 @@ def download_mind(bundles=("small_train", "small_dev")):
     for key in bundles:
         url = MIND_URLS[key]
         zip_path = _download_file(url, MIND_RAW_DIR)
-        _unzip(zip_path, MIND_RAW_DIR)
+        
+        # Extract into a dedicated subfolder to prevent overwriting
+        dest_dir = MIND_RAW_DIR / key
+        dest_dir.mkdir(exist_ok=True)
+        _unzip(zip_path, dest_dir)
 
     log.info(f"  MIND raw data saved to: {MIND_RAW_DIR}")
 

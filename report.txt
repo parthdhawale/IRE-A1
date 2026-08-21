@@ -1,0 +1,109 @@
+CS4.406 Assignment 1 Results
+Use this file to collect and store all the metric results and outputs for your final report / design note.
+Numbers below are stale placeholders from an earlier (buggy) run — recollect after re-running the pipeline.
+
+=====================================================================
+Question 2: BM25 Lexical Retrieval  (python -m src.retrieval.bm25 --dataset <mind|ebnerd>)
+=====================================================================
+MIND Dataset Results
+[STALE — rerun needed] Recall@50: 0.0103 / Recall@100: 0.0167 / Recall@200: 0.0245
+Query construction changed after these numbers were collected (title+abstract of
+last 10 articles -> title-only of last 5), to fix a severe EB-NeRD performance
+problem (see ai_usage_log.md) — MIND needs to be rerun with the same query
+construction for the two datasets to be comparable. Paste fresh numbers here.
+Recall@50:  [paste here]
+Recall@100: [paste here]
+Recall@200: [paste here]
+
+EB-NeRD Dataset Results
+Recall@50:  [paste here]
+Recall@100: [paste here]
+Recall@200: [paste here]
+
+=====================================================================
+Question 3: Semantic (Embedding) Retrieval  (python -m src.retrieval.semantic --dataset <mind|ebnerd>)
+=====================================================================
+MIND Dataset Results
+Recall@50:  [paste here]
+Recall@100: [paste here]
+Recall@200: [paste here]
+
+EB-NeRD Dataset Results
+Recall@50:  [paste here]
+Recall@100: [paste here]
+Recall@200: [paste here]
+
+Lexical vs. Semantic comparison notes:
+[which wins, on which dataset, on which slice — for the design note]
+
+=====================================================================
+Question 4: Offline Evaluation Harness
+(python -m src.evaluation.metrics --dataset <mind|ebnerd> --retriever <bm25|semantic>)
+=====================================================================
+--- MIND / BM25 ---
+AUC:      [paste here]   CI: [paste here]
+MRR:      [paste here]   CI: [paste here]
+nDCG@5:   [paste here]   CI: [paste here]
+nDCG@10:  [paste here]   CI: [paste here]
+Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
+Slice (cold-start vs warm): [paste here]
+
+--- MIND / Semantic ---
+AUC:      [paste here]   CI: [paste here]
+MRR:      [paste here]   CI: [paste here]
+nDCG@5:   [paste here]   CI: [paste here]
+nDCG@10:  [paste here]   CI: [paste here]
+Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
+Slice (cold-start vs warm): [paste here]
+
+--- EB-NeRD / BM25 ---
+AUC:      [paste here]   CI: [paste here]
+MRR:      [paste here]   CI: [paste here]
+nDCG@5:   [paste here]   CI: [paste here]
+nDCG@10:  [paste here]   CI: [paste here]
+Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
+Slice (cold-start vs warm): [paste here]
+
+--- EB-NeRD / Semantic ---
+AUC:      [paste here]   CI: [paste here]
+MRR:      [paste here]   CI: [paste here]
+nDCG@5:   [paste here]   CI: [paste here]
+nDCG@10:  [paste here]   CI: [paste here]
+Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
+Slice (cold-start vs warm): [paste here]
+
+--- Second slice type (head vs tail), at least one dataset/retriever ---
+[paste here]
+
+=====================================================================
+Question 5: Codabench Submission
+=====================================================================
+MIND leaderboard score / screenshot: [paste here / note screenshot filename]
+RecSys 2024 (EB-NeRD) leaderboard score / screenshot: [paste here / note screenshot filename]
+
+=====================================================================
+Question 9: Anti-Gaming / Leakage Test
+(pytest tests/test_no_leakage.py -v)
+=====================================================================
+Result: 6 passed, 0 failed (both datasets: mind, ebnerd)
+  - test_temporal_ordering[mind]       PASSED
+  - test_temporal_ordering[ebnerd]     PASSED
+  - test_no_val_ids_in_train[mind]     PASSED
+  - test_no_val_ids_in_train[ebnerd]   PASSED
+  - test_splits_are_disjoint[mind]     PASSED
+  - test_splits_are_disjoint[ebnerd]   PASSED
+Run time: 9.97s
+
+Notes on serving-time feature availability:
+click_history for each impression is truncated to articles clicked strictly
+before that impression's timestamp (enforced during preprocessing), so no
+future-click information leaks into features. Train/val/test are split
+purely by time (never randomly) with strictly increasing, non-overlapping
+time windows, verified above. One bug caught by this exact test during
+development: MIND's impression_id is only unique *within* a single
+behaviors.tsv file (train/dev/test each restart numbering from 1) — after
+combining the train+dev bundles for the temporal split, unrelated
+impressions from different source files briefly collided under the same ID.
+Fixed by prefixing impression_id with the split name before combining
+(the official competition test set is exempt, since Codabench expects its
+original unprefixed numeric IDs).

@@ -66,21 +66,35 @@ class SemanticRetriever:
     def build(self, force: bool = False):
         """Build (or load cached) FAISS index."""
         import faiss
-        import json
 
         articles = pd.read_parquet(self.proc_dir / "articles.parquet")
         self.corpus_ids = articles["article_id"].tolist()
         self.id_to_idx  = {aid: i for i, aid in enumerate(self.corpus_ids)}
 
-        if not force and self._faiss_path.exists() and self._emb_path.exists():
+        # A cached index/embeddings array can silently go stale if
+        # articles.parquet changes (e.g. re-running preprocessing after a
+        # fix) — the row count and row order it was built from may no longer
+        # match self.corpus_ids. Only trust the cache if the ids it was
+        # saved with are still exactly the current catalog, in the same order.
+        cached_ids = None
+        if self._ids_path.exists():
+            cached_ids = np.load(self._ids_path, allow_pickle=True).tolist()
+        cache_is_fresh = cached_ids == self.corpus_ids
+
+        if not force and cache_is_fresh and self._faiss_path.exists() and self._emb_path.exists():
             log.info(f"  Loading cached FAISS index from {self._faiss_path}")
             self.embeddings = np.load(self._emb_path)
             self.index = faiss.read_index(str(self._faiss_path))
             log.info(f"  Loaded: {self.index.ntotal:,} vectors, dim={self.embeddings.shape[1]}")
             return
+        if not force and cached_ids is not None and not cache_is_fresh:
+            log.warning(
+                f"  Cached embeddings ({len(cached_ids):,} articles) don't match the current "
+                f"article catalog ({len(self.corpus_ids):,} articles) — recomputing."
+            )
 
         # Load pre-computed or compute fresh embeddings
-        if self._emb_path.exists() and not force:
+        if self._emb_path.exists() and not force and cache_is_fresh:
             log.info(f"  Loading pre-computed embeddings from {self._emb_path}")
             self.embeddings = np.load(self._emb_path).astype(np.float32)
             # Ensure L2-normalised for cosine similarity
@@ -89,6 +103,7 @@ class SemanticRetriever:
         else:
             self.embeddings = self._compute_embeddings(articles)
             np.save(self._emb_path, self.embeddings)
+            np.save(self._ids_path, np.array(self.corpus_ids, dtype=object))
             log.info(f"  Embeddings saved: shape={self.embeddings.shape}")
 
         # Build FAISS flat inner-product index (= cosine after normalisation)
@@ -114,7 +129,7 @@ class SemanticRetriever:
         return user_emb.astype(np.float32)
 
     def retrieve(self, click_history: list[str], k: int = 100) -> list[str]:
-        """Return top-k article IDs for a single user."""
+        """Return top-k article IDs (from the full corpus) for a single user."""
         if self.embeddings is None:
             raise RuntimeError("Call .build() before .retrieve()")
 
@@ -126,31 +141,71 @@ class SemanticRetriever:
         _, top_k_idx = self.index.search(user_emb, k)
         return [self.corpus_ids[i] for i in top_k_idx[0] if i < len(self.corpus_ids)]
 
+    def score_candidates(self, click_history: list[str], candidate_ids: list[str]) -> list[float]:
+        """Score only a given impression's candidate list (for the eval harness),
+        instead of searching the whole corpus for a top-k list. Score is the
+        cosine similarity (inner product of normalised vectors) between the
+        user embedding and each candidate's embedding."""
+        if self.embeddings is None:
+            raise RuntimeError("Call .build() before .score_candidates()")
+        user_emb = self._user_embedding(click_history)
+        if user_emb is None:
+            return [0.0] * len(candidate_ids)
+        scores = []
+        for cid in candidate_ids:
+            idx = self.id_to_idx.get(cid)
+            scores.append(float(np.dot(user_emb, self.embeddings[idx])) if idx is not None else 0.0)
+        return scores
+
     # ── Evaluate ───────────────────────────────────────────────────────────────
 
     def evaluate(self, val_df: pd.DataFrame, k_values: list[int] = (50, 100, 200)) -> dict:
-        """Compute recall@K on a validation split."""
-        results = {k: [] for k in k_values}
+        """
+        Compute recall@K on a validation split.
+        Fully vectorized — builds all user embeddings at once, then a single FAISS batch search.
+        """
+        from tqdm import tqdm
+
+        if self.embeddings is None:
+            raise RuntimeError("Call .build() before .evaluate()")
+
         max_k = max(k_values)
 
-        log.info(f"  Evaluating semantic retrieval on {len(val_df):,} impressions...")
-        for _, row in val_df.iterrows():
-            relevant = [
-                cid for cid, lbl in zip(row["candidates"], row["labels"])
-                if lbl == 1
-            ]
+        log.info(f"  Building user embeddings for {len(val_df):,} impressions...")
+        user_embs = []
+        ground_truths = []
+
+        for _, row in tqdm(val_df.iterrows(), total=len(val_df),
+                           desc="Building user embeddings", ncols=80):
+            relevant = {cid for cid, lbl in zip(row["candidates"], row["labels"]) if lbl == 1}
             if not relevant:
                 continue
+            emb = self._user_embedding(row["click_history"])
+            if emb is None:
+                continue
+            user_embs.append(emb)
+            ground_truths.append(relevant)
 
-            retrieved = self.retrieve(row["click_history"], k=max_k)
+        if not user_embs:
+            log.warning("  No valid user embeddings found!")
+            return {f"recall@{k}": 0.0 for k in k_values}
+
+        # Single batch FAISS search for all users at once
+        query_matrix = np.stack(user_embs, axis=0).astype(np.float32)  # (Q, D)
+        log.info(f"  Running FAISS batch search for {len(user_embs):,} users (k={max_k})...")
+        _, top_indices = self.index.search(query_matrix, max_k)  # (Q, max_k)
+
+        log.info("  Computing recall@K...")
+        results = {k: [] for k in k_values}
+        for qi, (row_idx, relevant) in enumerate(zip(top_indices, ground_truths)):
+            retrieved_ids = [self.corpus_ids[i] for i in row_idx if i < len(self.corpus_ids)]
             for k in k_values:
-                retrieved_k = set(retrieved[:k])
-                recall = len(retrieved_k & set(relevant)) / len(relevant)
+                recall = len(set(retrieved_ids[:k]) & relevant) / len(relevant)
                 results[k].append(recall)
 
         summary = {}
         for k in k_values:
-            mean_recall = np.mean(results[k]) if results[k] else 0.0
+            mean_recall = float(np.mean(results[k])) if results[k] else 0.0
             summary[f"recall@{k}"] = round(mean_recall, 4)
             log.info(f"  recall@{k} = {mean_recall:.4f}")
 

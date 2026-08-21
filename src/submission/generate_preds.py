@@ -4,6 +4,15 @@ src/submission/generate_preds.py — Generate Codabench prediction files (Q5).
 MIND format   : one line per impression → "ImpressionID [N1-rank N2-rank ...]"
 EB-NeRD format: parquet with columns impression_id, article_id, score
 
+By default this scores the official, unlabeled Codabench test bundle
+(impressions_competition_test.parquet, produced by preprocess_all() from
+MINDlarge_test / ebnerd_testset — only present if the pipeline was run with
+--large) — this is the file that must actually be submitted to the
+leaderboards. Pass --split test to instead score our own internal temporal
+test split (data/{dataset}/processed/test.parquet), which is useful for a
+prediction-format dry run but is NOT what Codabench expects, since it's
+carved from labeled training data rather than the real held-out set.
+
 Usage
 -----
     python -m src.submission.generate_preds --dataset mind --retriever bm25
@@ -91,7 +100,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset",   choices=["mind", "ebnerd"], required=True)
     parser.add_argument("--retriever", choices=["bm25", "semantic"], default="bm25")
-    parser.add_argument("--split",     default="test", help="Which split to predict on")
+    parser.add_argument(
+        "--split", default="competition_test",
+        help="Which split to predict on. 'competition_test' (default) is the "
+             "official unlabeled Codabench test set; 'test' is our own internal "
+             "temporal test split (labeled, NOT for actual submission).",
+    )
     args = parser.parse_args()
 
     from src.pipeline.feature_store import load_split

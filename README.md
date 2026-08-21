@@ -41,9 +41,15 @@ python -m src.retrieval.semantic --dataset ebnerd
 ## Run Evaluation
 
 ```bash
-# Offline eval harness (AUC, MRR, nDCG@5, nDCG@10 + slicing + CIs)
-python -m src.evaluation.metrics --dataset mind
-python -m src.evaluation.metrics --dataset ebnerd
+# Offline eval harness — re-ranks val impressions with the chosen retriever and
+# reports AUC, MRR, nDCG@5, nDCG@10, diversity, novelty, coverage + slicing + CIs
+python -m src.evaluation.metrics --dataset mind   --retriever bm25
+python -m src.evaluation.metrics --dataset mind   --retriever semantic
+python -m src.evaluation.metrics --dataset ebnerd --retriever bm25
+python -m src.evaluation.metrics --dataset ebnerd --retriever semantic
+
+# Slice by head/tail articles instead of the default cold-start/warm users
+python -m src.evaluation.metrics --dataset mind --retriever bm25 --slice head_tail
 ```
 
 ---
@@ -54,6 +60,12 @@ python -m src.evaluation.metrics --dataset ebnerd
 python -m src.submission.generate_preds --dataset mind   --retriever bm25
 python -m src.submission.generate_preds --dataset ebnerd --retriever semantic
 ```
+
+By default this scores `impressions_competition_test.parquet` — the official,
+unlabeled MINDlarge_test / ebnerd_testset bundle produced by `build_pipeline.py
+--large` — which is what actually gets submitted to Codabench. Pass `--split
+test` instead to score our own internal (labeled) temporal test split, useful
+as a prediction-format dry run.
 
 Prediction files are saved to `predictions/`.
 

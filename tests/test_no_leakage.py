@@ -9,15 +9,28 @@ Run with:
     pytest tests/test_no_leakage.py -v
 """
 
-import pandas as pd
-import pytest
 from pathlib import Path
 
+import pandas as pd
+import pyarrow.parquet as pq
+import pytest
 
-def load_splits(proc_dir: Path):
-    train = pd.read_parquet(proc_dir / "train.parquet")
-    val   = pd.read_parquet(proc_dir / "val.parquet")
-    test  = pd.read_parquet(proc_dir / "test.parquet")
+
+def _read_columns(path: Path, columns: list[str]) -> pd.DataFrame:
+    """Read only the given columns via pyarrow's column projection.
+
+    train.parquet on the large EB-NeRD bundle is ~8GB / 20M+ rows with
+    click_history/candidates/labels list-columns — a plain `pd.read_parquet`
+    materializes those as Python objects and reliably OOMs. None of these
+    tests need those columns, so skip reading them entirely.
+    """
+    return pq.read_table(path, columns=columns).to_pandas()
+
+
+def load_split_columns(proc_dir: Path, columns: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train = _read_columns(proc_dir / "train.parquet", columns)
+    val = _read_columns(proc_dir / "val.parquet", columns)
+    test = _read_columns(proc_dir / "test.parquet", columns)
     return train, val, test
 
 
@@ -30,7 +43,7 @@ def test_temporal_ordering(dataset, proc_dir):
     if not (proc_dir / "train.parquet").exists():
         pytest.skip(f"Processed data not found for {dataset}. Run build_pipeline.py first.")
 
-    train, val, test = load_splits(proc_dir)
+    train, val, test = load_split_columns(proc_dir, ["timestamp"])
 
     train_max = pd.to_datetime(train["timestamp"], utc=True).max()
     val_min   = pd.to_datetime(val["timestamp"],   utc=True).min()
@@ -53,7 +66,7 @@ def test_no_val_ids_in_train(dataset, proc_dir):
     if not (proc_dir / "train.parquet").exists():
         pytest.skip(f"Processed data not found for {dataset}.")
 
-    train, val, test = load_splits(proc_dir)
+    train, val, test = load_split_columns(proc_dir, ["impression_id"])
 
     train_ids = set(train["impression_id"].astype(str))
     val_ids   = set(val["impression_id"].astype(str))
@@ -75,7 +88,7 @@ def test_splits_are_disjoint(dataset, proc_dir):
     if not (proc_dir / "train.parquet").exists():
         pytest.skip(f"Processed data not found for {dataset}.")
 
-    train, val, test = load_splits(proc_dir)
+    train, val, test = load_split_columns(proc_dir, ["timestamp"])
 
     train_ts = pd.to_datetime(train["timestamp"], utc=True)
     val_ts   = pd.to_datetime(val["timestamp"],   utc=True)
