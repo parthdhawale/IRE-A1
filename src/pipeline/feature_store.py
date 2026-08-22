@@ -169,11 +169,13 @@ def load_embeddings(dataset: str) -> tuple[np.ndarray, dict]:
     return embeddings, id_to_idx
 
 
-def load_split(dataset: str, split: str) -> pd.DataFrame:
+def resolve_split_path(dataset: str, split: str) -> Path:
+    """Find the parquet file backing a given dataset split, trying the
+    split's own name first then falling back to preprocess_all()'s
+    impressions_{split} naming (val→validation, dev→val, impressions_X)."""
     proc_dir = MIND_PROC_DIR if dataset == "mind" else EBNERD_PROC_DIR
     path = proc_dir / f"{split}.parquet"
     if not path.exists():
-        # Try alternate names: val→validation, dev→val, impressions_X
         alternates = [
             proc_dir / f"impressions_{split}.parquet",
             proc_dir / f"impressions_{'dev' if split == 'val' else split}.parquet",
@@ -183,4 +185,8 @@ def load_split(dataset: str, split: str) -> pd.DataFrame:
             if alt.exists():
                 path = alt
                 break
-    return pd.read_parquet(path)
+    return path
+
+
+def load_split(dataset: str, split: str) -> pd.DataFrame:
+    return pd.read_parquet(resolve_split_path(dataset, split))

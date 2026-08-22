@@ -105,6 +105,18 @@ For each AI interaction, fill in:
 - **Human modifications**: reviewed and accepted; ran the corrected pipeline myself (35 min, completed cleanly) and the diagnostic checks were run to explain the resulting numbers, not to further alter code.
 - **Files affected**: `src/retrieval/bm25.py` (Danish stopwords, tokenizer regex fix, shortened query construction — from the prior session's continuation; this entry documents the cross-check and reasoning, no further code changes made in this entry).
 
+### Entry 7
+- **Tool**: Claude Code (Claude Sonnet 5)
+- **Date**: 2026-08-22
+- **Prompt**: While generating `predictions/ebnerd_bm25_submission.zip`, macOS force-quit the whole session, reporting Claude Code (i.e. this session's Python subprocess) had grown to ~60GB RAM and had to be shut down. Asked to investigate and fix, then separately asked to add a progress bar to the same command.
+- **AI output used**: Yes
+- **Diagnosis**: a leftover diagnostic `pd.read_parquet()` call (run to sanity-check the newly-generated 13.5M-row, 7GB `impressions_competition_test.parquet`) was left running unattended in the background after being flagged as risky but not killed — it hit the same list-column-as-Python-objects problem fixed elsewhere in this codebase (see Entries 2-3), just never applied to `generate_preds.py`'s own data loading path. `src/pipeline/feature_store.py`'s `load_split()` (used by `generate_preds.py` to load the split to predict on) does a plain `pd.read_parquet()` on the whole file — fine for MIND's 2.37M-row competition test, but EB-NeRD's is 13.5M rows with a `click_history` list averaging ~200+ items per row, redundantly repeated per impression (not deduplicated per user) — materializing that as Python objects for every row simultaneously is what plausibly reached ~60GB.
+- **Human modifications**: reviewed and accepted; verified both correctness (100,000 streamed lines checked byte-identical against the already-uploaded, Codabench-verified `mind_bm25_submission.zip`) and memory safety (sampled peak RSS every few batches on the real EB-NeRD file — 2.2GB → 3.5GB → 4.0GB → 4.5GB → 4.75GB → 4.89GB → 4.89GB → 4.89GB, clearly plateauing rather than growing with row count) before handing back for the user's own full run.
+- **Files affected**:
+  - `src/pipeline/feature_store.py` — split `load_split()`'s path-resolution logic out into a new `resolve_split_path()` so callers can stream a file instead of loading it whole; `load_split()` itself is unchanged for existing callers.
+  - `src/submission/generate_preds.py` — rewritten to stream the impressions file in pyarrow row-group batches (`iter_impression_batches`, 100K rows/batch, only the 3 columns actually needed) instead of loading the full split via `load_split()`; added a `tqdm` progress bar over the streamed total (this was also the direct answer to the separate "add a progress bar" ask — the bar was already present from an earlier fix, but adding it properly required this rewrite anyway since the old version's progress bar sat downstream of the risky full load).
+- **Note**: the actual crash cost no data — all previously-generated files (EB-NeRD's `impressions_competition_test.parquet`, both MIND submission zips) were verified intact afterward via a safe pyarrow column-projected read, not the risky full load that had just crashed.
+
 ---
 
 _Add new entries below as you continue using AI tools._
