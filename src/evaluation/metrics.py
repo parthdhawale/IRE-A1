@@ -212,8 +212,12 @@ class EvaluationHarness:
         total_users = max(len(df), 1)
 
         for _, row in df.iterrows():
-            labels = row.get("labels", [])
-            if not labels or all(l is None for l in labels) or not any(labels):
+            # labels/candidates come back as numpy arrays (not plain lists)
+            # from pyarrow-backed parquet list columns via df.iterrows() — a
+            # bare `not labels` on a multi-element array raises "truth value
+            # of an array... is ambiguous", so check length/content explicitly.
+            labels = list(row.get("labels", []))
+            if len(labels) == 0 or all(l is None for l in labels) or not any(labels):
                 continue
 
             ranked_labels, ranked_ids = rank_impression(row, retriever)

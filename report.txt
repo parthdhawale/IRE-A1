@@ -16,45 +16,125 @@ Recall@100: [paste here]
 Recall@200: [paste here]
 
 EB-NeRD Dataset Results
-Recall@50:  [paste here]
-Recall@100: [paste here]
-Recall@200: [paste here]
+Recall@50:  0.0069
+Recall@100: 0.0081
+Recall@200: 0.0108
+Run time: 35 min (999 chunks of 2000 queries, 1,997,301 total val queries)
+
+Sanity-check notes (recall looks low + the growth curve is flatter than MIND's
+2.5-3.5x/K-quadrupling — both verified as expected, not a bug):
+  - Every val impression has real click_history (avg 274 articles, 0% empty) —
+    ruled out cold-start/empty-query as the cause.
+  - EB-NeRD's actual shown candidate pool per impression is tiny (median 9,
+    avg 12 articles) — but recall@K here is measured against the FULL
+    125,541-article corpus (correct per Q2's "retrieve top-K... report
+    recall@K" spec), a much harder task than picking among ~9 curated
+    candidates. This is a genuinely different, harder methodology than
+    MIND's, not a defect.
+  - No stemming/lemmatization is applied (standard for BM25) — Danish's
+    richer morphology (compounding, inflection) means literal token overlap
+    misses more true matches than it would in English.
+  - Query construction was shortened from title+abstract of the last 10
+    clicked articles to title-only of the last 5, specifically to make
+    full-corpus scoring computationally tractable at 2M queries (see
+    ai_usage_log.md) — a deliberate speed/recall tradeoff, worth naming
+    explicitly in the design note's "alternatives considered" section.
 
 =====================================================================
 Question 3: Semantic (Embedding) Retrieval  (python -m src.retrieval.semantic --dataset <mind|ebnerd>)
 =====================================================================
 MIND Dataset Results
-Recall@50:  [paste here]
-Recall@100: [paste here]
-Recall@200: [paste here]
+Recall@50:  0.0099
+Recall@100: 0.0155
+Recall@200: 0.0248
+Model: all-MiniLM-L6-v2 (English, 384-dim), articles encoded from title+abstract.
+Run time: ~3 min total (2m23s encoding 125,589 articles; FAISS search itself <3s
+for 29,498 users with a non-empty history, k=200).
 
 EB-NeRD Dataset Results
-Recall@50:  [paste here]
-Recall@100: [paste here]
-Recall@200: [paste here]
+Recall@50:  0.0008
+Recall@100: 0.0016
+Recall@200: 0.0031
+Model: paraphrase-multilingual-MiniLM-L12-v2 (multilingual, 384-dim), no fine-tuning.
+Run time: ~4 min total (encoding + FAISS batch search over 1,997,301 val users).
+
+Sanity-check notes (this is ~4-8x lower than EB-NeRD BM25 — verified as a real
+finding, not a bug):
+  - Embeddings verified sound: unit-normalized (norm ~1.0 for all rows), no
+    NaN/Inf, no degenerate/identical rows.
+  - Index alignment verified exact: corpus_ids.npy matches articles.parquet's
+    article_id column length, order, and set exactly — no stale-cache issue.
+  - Qualitative nearest-neighbor spot check (4 random articles, top-5 by
+    cosine similarity): one query (a luxury-hotel-closure story) clustered
+    tightly on-topic with other hotel-closure stories (sim ~0.68-0.70). The
+    other three (a football club story, a celebrity-scandal story, a sports
+    veteran story) clustered more by tabloid tone/register ("dramatic
+    scandal" headlines) than by actual topic. This is a real, expected
+    limitation of an off-the-shelf multilingual model with no fine-tuning
+    for this specific domain (Danish tabloid news) — not an implementation
+    bug.
+  - Two compounding factors beyond the model itself: (1) the user
+    representation is a mean-pool of the last 10 clicked articles' embeddings,
+    which can dilute signal for a reader with varied interests, unlike BM25's
+    precise per-term matching; (2) same full-125K-corpus-vs-tiny-candidate-pool
+    gap noted for BM25 above.
 
 Lexical vs. Semantic comparison notes:
-[which wins, on which dataset, on which slice — for the design note]
+MIND: essentially a tie. BM25 = 0.0103/0.0167/0.0245, Semantic = 0.0099/0.0155/0.0248
+(BM25 marginally ahead at K=50/100, semantic marginally ahead at K=200). Makes
+sense for MIND — English news headlines/abstracts have enough exact lexical
+overlap between a user's click history and the true next click that BM25's
+term matching stays competitive with dense embeddings at this scale.
+
+EB-NeRD: BM25 clearly wins (0.0069/0.0081/0.0108 vs semantic's 0.0008/0.0016/0.0031,
+~4-8x higher). The gap vs. MIND (where the two methods tied) is the interesting
+result for the design note: lexical retrieval degrades gracefully to a
+non-English, non-fine-tuned setting, while general-purpose multilingual dense
+embeddings degrade much more sharply without domain fine-tuning. Good candidate
+for the "where it breaks / what we'd improve" discussion — a fine-tuned or
+domain-adapted Danish embedding model would likely close this gap significantly.
 
 =====================================================================
 Question 4: Offline Evaluation Harness
 (python -m src.evaluation.metrics --dataset <mind|ebnerd> --retriever <bm25|semantic>)
 =====================================================================
---- MIND / BM25 ---
-AUC:      [paste here]   CI: [paste here]
-MRR:      [paste here]   CI: [paste here]
-nDCG@5:   [paste here]   CI: [paste here]
-nDCG@10:  [paste here]   CI: [paste here]
-Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
-Slice (cold-start vs warm): [paste here]
+--- MIND / BM25 ---  (N=30,269)
+AUC:      0.5412   CI: [0.5379, 0.5444]
+MRR:      0.2827   CI: [0.2792, 0.2862]
+nDCG@5:   0.2533   CI: [0.2493, 0.2572]
+nDCG@10:  0.3107   CI: [0.3070, 0.3143]
+Diversity: 0.7660   Novelty: 8.0182   Coverage: 0.0293
+Slice (cold-start vs warm):
+  cold-start (N=4,017): AUC=0.5322 MRR=0.2751 nDCG@5=0.2604 nDCG@10=0.3198 nov=4.9095 cov=0.0141
+  warm       (N=26,252): AUC=0.5426 MRR=0.2839 nDCG@5=0.2522 nDCG@10=0.3093 nov=7.8427 cov=0.0281
+  Note: cold-start users get *higher* nDCG despite lower AUC/coverage — with a
+  short history their BM25 query is more topically focused (fewer competing
+  interests to average over), so when it does rank a relevant item, it tends
+  to rank it higher. Warm users' broader histories give more accurate overall
+  discrimination (AUC) but a noisier top-of-list.
 
---- MIND / Semantic ---
-AUC:      [paste here]   CI: [paste here]
-MRR:      [paste here]   CI: [paste here]
-nDCG@5:   [paste here]   CI: [paste here]
-nDCG@10:  [paste here]   CI: [paste here]
-Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
-Slice (cold-start vs warm): [paste here]
+--- MIND / Semantic ---  (N=30,269)
+AUC:      0.6212   CI: [0.6179, 0.6247]
+MRR:      0.3268   CI: [0.3233, 0.3308]
+nDCG@5:   0.3027   CI: [0.2990, 0.3069]
+nDCG@10:  0.3617   CI: [0.3580, 0.3655]
+Diversity: 0.7239   Novelty: 8.0414   Coverage: 0.0284
+Slice (cold-start vs warm):
+  cold-start (N=4,017): AUC=0.5706 MRR=0.2961 nDCG@5=0.2816 nDCG@10=0.3423 nov=4.9034 cov=0.0143
+  warm       (N=26,252): AUC=0.6289 MRR=0.3315 nDCG@5=0.3060 nDCG@10=0.3646 nov=7.8703 cov=0.0268
+
+MIND re-ranking: BM25 vs Semantic — semantic clearly wins here (AUC 0.6212 vs
+0.5412, MRR 0.3268 vs 0.2827, nDCG@10 0.3617 vs 0.3107), unlike the earlier
+full-corpus recall@K result where the two were roughly tied. Worth flagging
+in the design note as a genuinely different task: recall@K measures whether
+BM25/semantic can *find* the right article among all 125K, while this harness
+measures whether it can *rank it highly* within the small candidate set the
+platform already curated — semantic similarity is a stronger ranking signal
+than exact term overlap once the candidate set is already narrowed down.
+Also note: unlike BM25 (where cold-start edged out warm on nDCG), semantic
+here has warm > cold-start on every ranking metric — dense embeddings seem
+to benefit more from a longer averaging history than BM25's sparse matching
+does.
 
 --- EB-NeRD / BM25 ---
 AUC:      [paste here]   CI: [paste here]

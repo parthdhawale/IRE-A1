@@ -95,6 +95,16 @@ For each AI interaction, fill in:
 - **Files affected**: `src/retrieval/bm25.py` — added `get_scores_batch_sparse` (sparse-native batch scoring), rewrote `evaluate()`'s scoring loop, added a Danish stopword list (`DANISH_STOPWORDS`, verified empirically against real document frequencies) alongside the existing English one, fixed the tokenizer regex to include æ/ø/å, and changed `_build_query_tokens` to title-only / last-5-articles.
 - **Note**: because query construction changed, MIND's BM25 recall numbers collected earlier in this session are stale and need to be recollected with the same (now-consistent) query construction before the two datasets can be compared.
 
+### Entry 6
+- **Tool**: Claude Code (Claude Sonnet 5)
+- **Date**: 2026-08-21 to 2026-08-22
+- **Prompt**: `python -m src.retrieval.bm25 --dataset ebnerd` was projected at ~2 hours; after a first fix (avoid densifying scores in evaluate()) it was still projected at ~33-35 min. Asked to fix, then asked to cross-check whether the resulting recall numbers (0.0069/0.0081/0.0108) were actually correct rather than a symptom of a residual bug.
+- **AI output used**: Yes
+- **Diagnosis (speed)**: the real bottleneck wasn't the dense/sparse distinction at all — `STOPWORDS` in `bm25.py` was English-only, so it did nothing for EB-NeRD's Danish text; the most common terms in the corpus were Danish function words ("og" in 96.6% of all 125,541 articles). The tokenizer regex (`[a-z]{2,}`) was also ASCII-only, silently mangling words containing æ/ø/å into meaningless fragments (confirmed: "være" → "re", "også" → "ogs", both of which then showed up as if they were real high-frequency terms). Even after fixing both, average nonzero-score density per query was still ~52.6% of the corpus (65,992/125,541 docs) — an inherent property of BM25 over a topically homogeneous news corpus, not a bug — since even non-stopwords ("år"=year, "siger"=says) are extremely common in news writing. Shortened the query construction (title-only, last 5 clicks, down from title+abstract of the last 10) as a deliberate speed/recall tradeoff to make full-corpus scoring tractable at ~2M queries.
+- **Diagnosis (correctness cross-check)**: verified the resulting recall values are real, not a bug — every val impression has non-empty click_history (avg 274 articles, ruling out a cold-start/empty-query artifact); EB-NeRD's actual candidate pool per impression is tiny (median 9 articles) while recall@K is correctly measured against the full 125K-article corpus per the assignment's Q2 spec, which is a much harder task than MIND's typically-larger candidate pools; no stemming is applied (standard for BM25) which disadvantages Danish's richer morphology more than English.
+- **Human modifications**: reviewed and accepted; ran the corrected pipeline myself (35 min, completed cleanly) and the diagnostic checks were run to explain the resulting numbers, not to further alter code.
+- **Files affected**: `src/retrieval/bm25.py` (Danish stopwords, tokenizer regex fix, shortened query construction — from the prior session's continuation; this entry documents the cross-check and reasoning, no further code changes made in this entry).
+
 ---
 
 _Add new entries below as you continue using AI tools._
