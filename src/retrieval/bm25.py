@@ -274,18 +274,45 @@ class BM25Retriever:
         return [self.corpus_ids[i] for i in top_k_idx]
 
     def score_candidates(self, click_history: list[str], candidate_ids: list[str]) -> list[float]:
-        """Score only a given impression's candidate list (for the eval harness),
-        instead of searching the whole corpus for a top-k list."""
+        """Score only a given impression's candidate list (for the eval harness).
+
+        Deliberately does NOT go through get_scores()/get_scores_batch_sparse,
+        which score the query against the *entire* corpus (needed for
+        recall@K's full-corpus search, but here candidate_ids is already a
+        tiny curated set — typically ~9-12 articles). Scoring the whole 125K+
+        corpus per impression just to keep a handful of values, done in a
+        Python loop over ~2M EB-NeRD impressions, is precisely the "score
+        everything, discard 99.99%" pattern already fixed in evaluate() —
+        it just moved into this call path instead. Slicing the candidates'
+        rows directly out of tf_matrix and dotting against the (tiny) query
+        IDF vector computes only what's actually needed.
+        """
         if self.bm25 is None:
             raise RuntimeError("Call .build() before .score_candidates()")
         query = self._build_query_tokens(click_history, self._articles_lookup)
         if not query:
             return [0.0] * len(candidate_ids)
-        all_scores = self.bm25.get_scores(query)
-        return [
-            float(all_scores[self._corpus_id_to_idx[cid]]) if cid in self._corpus_id_to_idx else 0.0
-            for cid in candidate_ids
-        ]
+        tids = [self.bm25.term2id[t] for t in query if t in self.bm25.term2id]
+        if not tids:
+            return [0.0] * len(candidate_ids)
+
+        cand_idxs = [self._corpus_id_to_idx.get(cid) for cid in candidate_ids]
+        valid_positions = [i for i, idx in enumerate(cand_idxs) if idx is not None]
+        if not valid_positions:
+            return [0.0] * len(candidate_ids)
+
+        q_idf = np.zeros(len(self.bm25.term2id), dtype=np.float32)
+        for tid in set(tids):
+            q_idf[tid] = self.bm25.idf[tid]
+
+        valid_idxs = [cand_idxs[i] for i in valid_positions]
+        sub_tf = self.bm25.tf_matrix[valid_idxs]  # (n_valid, V) sparse — just these rows
+        scores_valid = sub_tf.dot(q_idf)  # small dense (n_valid,) result
+
+        scores = [0.0] * len(candidate_ids)
+        for pos, val in zip(valid_positions, scores_valid):
+            scores[pos] = float(val)
+        return scores
 
     # ── Evaluate (fully vectorized — handles 30k queries in seconds) ───────────
 

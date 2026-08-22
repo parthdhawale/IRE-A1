@@ -207,11 +207,14 @@ class EvaluationHarness:
         self, df: pd.DataFrame, retriever, k: int,
         pop: dict, embeddings, id_to_idx, catalog_size: int, label: str,
     ) -> dict:
+        from tqdm import tqdm
+
         metric_lists: dict[str, list] = {"auc": [], "mrr": [], "ndcg@5": [], "ndcg@10": []}
         diversity_scores, novelty_scores, all_recommended = [], [], []
         total_users = max(len(df), 1)
 
-        for _, row in df.iterrows():
+        log.info(f"  Evaluating slice '{label}' ({len(df):,} impressions)...")
+        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"  {label}", ncols=80):
             # labels/candidates come back as numpy arrays (not plain lists)
             # from pyarrow-backed parquet list columns via df.iterrows() — a
             # bare `not labels` on a multi-element array raises "truth value

@@ -136,24 +136,89 @@ here has warm > cold-start on every ranking metric — dense embeddings seem
 to benefit more from a longer averaging history than BM25's sparse matching
 does.
 
---- EB-NeRD / BM25 ---
-AUC:      [paste here]   CI: [paste here]
-MRR:      [paste here]   CI: [paste here]
-nDCG@5:   [paste here]   CI: [paste here]
-nDCG@10:  [paste here]   CI: [paste here]
-Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
-Slice (cold-start vs warm): [paste here]
+--- EB-NeRD / BM25 ---  (N=1,997,301)
+AUC:      0.4929   CI: [0.4924, 0.4933]
+MRR:      0.3159   CI: [0.3155, 0.3162]
+nDCG@5:   0.3445   CI: [0.3441, 0.3450]
+nDCG@10:  0.4292   CI: [0.4289, 0.4296]
+Diversity: 0.6960   Novelty: 8.7083   Coverage: 0.0426
+Run time: ~40 min (two full 20-min passes — see slicing note below)
 
---- EB-NeRD / Semantic ---
-AUC:      [paste here]   CI: [paste here]
-MRR:      [paste here]   CI: [paste here]
-nDCG@5:   [paste here]   CI: [paste here]
-nDCG@10:  [paste here]   CI: [paste here]
-Diversity: [paste here]   Novelty: [paste here]   Coverage: [paste here]
-Slice (cold-start vs warm): [paste here]
+Slice (cold-start vs warm): DEGENERATE for EB-NeRD — cold-start (threshold=5
+clicks) = 0 impressions, warm = all 1,997,301 (identical to 'all' row above).
+Every val user already has substantial click history (avg 274, 0% empty —
+see Q3 sanity-check notes), so this cutoff never discriminates on this
+dataset the way it does on MIND. Not a bug — just means cold/warm isn't a
+meaningful slice for EB-NeRD; using head/tail instead for EB-NeRD's required
+"at least one slice" coverage (see below once run).
 
---- Second slice type (head vs tail), at least one dataset/retriever ---
-[paste here]
+IMPORTANT finding — re-ranking quality is close to random for EB-NeRD/BM25:
+AUC=0.4929 is essentially chance level (0.5), and MRR=0.3159 is almost
+exactly the theoretical random-ranking baseline for ~9-candidate lists
+(1/9 * sum(1/i for i in 1..9) ≈ 0.314 — EB-NeRD's median candidate count is
+9). nDCG@5/10 being moderate despite this is mathematically consistent (still
+gives partial position credit even under near-random global ordering) rather
+than contradictory. This is a genuinely different result from the full-corpus
+recall@K numbers (Q2), which were clearly non-trivial — recall@K tests
+whether BM25 can *find* the right article among 125K, while this harness
+tests whether it can *rank it near the top* of a small ~9-item curated
+candidate set, and the shortened title-only/last-5-click query (a deliberate
+speed tradeoff from Q2, see ai_usage_log.md) likely isn't discriminative
+enough for that finer-grained task. Comparing against semantic's numbers on
+the identical task next should clarify whether this is BM25/query-specific
+or a broader dataset characteristic.
+
+--- EB-NeRD / Semantic ---  (N=1,997,301)
+AUC:      0.5399   CI: [0.5395, 0.5404]
+MRR:      0.3364   CI: [0.3360, 0.3368]
+nDCG@5:   0.3725   CI: [0.3721, 0.3729]
+nDCG@10:  0.4519   CI: [0.4515, 0.4523]
+Diversity: 0.6759   Novelty: 8.6592   Coverage: 0.0421
+Run time: ~36 min (two full 18-min passes; cold-start again degenerate, N=0 —
+same reason as BM25, see above)
+
+RESOLVED — this answers the open question from the BM25/EB-NeRD entry above.
+Semantic clearly beats chance here (AUC=0.5399) where BM25 did not
+(AUC=0.4929, essentially random). Every metric is higher: MRR 0.3364 vs
+0.3159, nDCG@10 0.4519 vs 0.4292. This is the OPPOSITE ordering from Q3's
+full-corpus recall@K, where BM25 clearly beat semantic on EB-NeRD (4-8x).
+Coherent explanation: BM25's query was deliberately shortened to title-only
+text from the last 5 clicks (a speed trade forced by full-corpus scoring
+cost, see ai_usage_log.md) and apparently doesn't carry enough signal for
+fine-grained re-ranking of a small ~9-candidate set, even though it was
+sufficient for the coarser "find it somewhere in 125K" task. Semantic's user
+representation was never touched by that trade (full title+abstract text,
+mean-pooled over the last 10 clicks) and retains just enough usable signal
+to meaningfully beat chance at re-ranking, despite being far weaker at
+full-corpus retrieval. Net takeaway for the design note: which method "wins"
+depends entirely on which task you're evaluating — full-catalog candidate
+generation (Q2/Q3 recall@K) vs. re-ranking an already-curated shortlist
+(Q4's harness) are genuinely different problems that reward different
+retrieval properties.
+
+--- Second slice type (head vs tail) — EB-NeRD / BM25 ---
+head (top-10% popular articles, N=1,961,548, 98.2% of impressions):
+  AUC=0.4921 [0.4917,0.4926]  MRR=0.3154 [0.3151,0.3158]
+  nDCG@5=0.3438 [0.3433,0.3443]  nDCG@10=0.4289 [0.4285,0.4293]
+  diversity=0.6971  novelty=8.6212  coverage=0.0326
+tail (remaining 90% by popularity, N=35,753, 1.8% of impressions):
+  AUC=0.5328 [0.5293,0.5363]  MRR=0.3396 [0.3366,0.3428]
+  nDCG@5=0.3838 [0.3801,0.3872]  nDCG@10=0.4471 [0.4440,0.4502]
+  diversity=0.6351  novelty=6.2539  coverage=0.0352
+
+FINDING — counterintuitive, worth a paragraph in the design note: tail
+(unpopular) articles rank *better* under BM25 than head (popular) ones —
+AUC 0.5328 vs 0.4921, i.e. tail is clearly above chance while head is at
+chance. This is the opposite of the usual "popularity bias favors head
+items" story. Plausible mechanism: BM25's whole scoring signal is IDF —
+rare, distinctive vocabulary. A niche/tail article is more likely to contain
+uncommon terms that give it a sharp, discriminative BM25 score; a popular
+head article (often mainstream, broadly-worded news) is more likely to share
+generic vocabulary with many other candidates in the same impression, making
+it harder for pure lexical overlap to tell them apart. This is a real
+argument for why a production system would want semantic/behavioral signals
+layered on top of BM25 specifically for head-item disambiguation, even
+though BM25 alone already does reasonably at surfacing tail content.
 
 =====================================================================
 Question 5: Codabench Submission
