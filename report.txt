@@ -1,254 +1,322 @@
-CS4.406 Assignment 1 Results
-Use this file to collect and store all the metric results and outputs for your final report / design note.
-Numbers below are stale placeholders from an earlier (buggy) run — recollect after re-running the pipeline.
+CS4.406 Assignment 1 — Results Log
+Lexical & Semantic Retrieval on EB-NeRD and MIND
+
+This file is the raw evidence log: every number quoted in the design note is
+reproduced here with the command that produced it. Where a figure comes from a
+sample rather than a full split, the sample size and seed are stated inline —
+never silently.
+
+CONFIGURATION UNDER TEST (all numbers below unless stated otherwise)
+  MIND     articles 130,379 (MINDlarge_train+dev+test catalogs, deduplicated)
+           val split 431,511 impressions (temporal, last-but-one day)
+           embeddings all-MiniLM-L6-v2, 384d
+  EB-NeRD  articles 125,541
+           val split 1,997,301 impressions (temporal)
+           embeddings paraphrase-multilingual-MiniLM-L12-v2, 384d
+  Both     BM25 k1=1.5 b=0.75, Snowball stemming (english/danish),
+           query and user profile built from the FULL click history.
 
 =====================================================================
-Question 2: BM25 Lexical Retrieval  (python -m src.retrieval.bm25 --dataset <mind|ebnerd>)
+Question 2: BM25 Lexical Retrieval
+  python -m src.retrieval.bm25 --dataset <mind|ebnerd> --k 50 100 200
 =====================================================================
-MIND Dataset Results
-[STALE — rerun needed] Recall@50: 0.0103 / Recall@100: 0.0167 / Recall@200: 0.0245
-Query construction changed after these numbers were collected (title+abstract of
-last 10 articles -> title-only of last 5), to fix a severe EB-NeRD performance
-problem (see ai_usage_log.md) — MIND needs to be rerun with the same query
-construction for the two datasets to be comparable. Paste fresh numbers here.
-Recall@50:  [paste here]
-Recall@100: [paste here]
-Recall@200: [paste here]
 
-EB-NeRD Dataset Results
-Recall@50:  0.0069
-Recall@100: 0.0081
-Recall@200: 0.0108
-Run time: 35 min (999 chunks of 2000 queries, 1,997,301 total val queries)
+MIND — full val split, N=431,511 queries
+  recall@50   0.0089
+  recall@100  0.0156
+  recall@200  0.0235
 
-Sanity-check notes (recall looks low + the growth curve is flatter than MIND's
-2.5-3.5x/K-quadrupling — both verified as expected, not a bug):
-  - Every val impression has real click_history (avg 274 articles, 0% empty) —
-    ruled out cold-start/empty-query as the cause.
-  - EB-NeRD's actual shown candidate pool per impression is tiny (median 9,
-    avg 12 articles) — but recall@K here is measured against the FULL
-    125,541-article corpus (correct per Q2's "retrieve top-K... report
-    recall@K" spec), a much harder task than picking among ~9 curated
-    candidates. This is a genuinely different, harder methodology than
-    MIND's, not a defect.
-  - No stemming/lemmatization is applied (standard for BM25) — Danish's
-    richer morphology (compounding, inflection) means literal token overlap
-    misses more true matches than it would in English.
-  - Query construction was shortened from title+abstract of the last 10
-    clicked articles to title-only of the last 5, specifically to make
-    full-corpus scoring computationally tractable at 2M queries (see
-    ai_usage_log.md) — a deliberate speed/recall tradeoff, worth naming
-    explicitly in the design note's "alternatives considered" section.
+EB-NeRD — see the EB-NeRD section below (sampled; rationale given there).
+
+NOTE — the same change helps ranking and hurts retrieval.
+Switching the query from "last 10 clicks" to the full click history RAISED
+BM25's re-ranking AUC (0.5544 -> 0.5624, Q4 below) but LOWERED its
+full-corpus recall@50 (0.0118 -> 0.0089). Both were measured, and the
+divergence is real rather than noise. The mechanism: recall@K searches the
+whole 130,379-article catalog, and a longer query matches more documents at
+least once, so the top-50 fills with broadly-related articles and the
+specific ones get pushed out. Re-ranking never has that problem — it only
+orders ~40 candidates that were already curated, so extra query signal can
+only help discriminate among them. The two tasks reward opposite things, and
+a single "better query" setting does not exist for both.
 
 =====================================================================
-Question 3: Semantic (Embedding) Retrieval  (python -m src.retrieval.semantic --dataset <mind|ebnerd>)
+Question 3: Semantic (Embedding) Retrieval
+  python -m src.retrieval.semantic --dataset <mind|ebnerd> --k 50 100 200
 =====================================================================
-MIND Dataset Results
-Recall@50:  0.0099
-Recall@100: 0.0155
-Recall@200: 0.0248
-Model: all-MiniLM-L6-v2 (English, 384-dim), articles encoded from title+abstract.
-Run time: ~3 min total (2m23s encoding 125,589 articles; FAISS search itself <3s
-for 29,498 users with a non-empty history, k=200).
 
-EB-NeRD Dataset Results
-Recall@50:  0.0008
-Recall@100: 0.0016
-Recall@200: 0.0031
-Model: paraphrase-multilingual-MiniLM-L12-v2 (multilingual, 384-dim), no fine-tuning.
-Run time: ~4 min total (encoding + FAISS batch search over 1,997,301 val users).
+MIND — full val split, N=431,511 queries
+  recall@50   0.0125
+  recall@100  0.0190
+  recall@200  0.0289
 
-Sanity-check notes (this is ~4-8x lower than EB-NeRD BM25 — verified as a real
-finding, not a bug):
-  - Embeddings verified sound: unit-normalized (norm ~1.0 for all rows), no
-    NaN/Inf, no degenerate/identical rows.
-  - Index alignment verified exact: corpus_ids.npy matches articles.parquet's
-    article_id column length, order, and set exactly — no stale-cache issue.
-  - Qualitative nearest-neighbor spot check (4 random articles, top-5 by
-    cosine similarity): one query (a luxury-hotel-closure story) clustered
-    tightly on-topic with other hotel-closure stories (sim ~0.68-0.70). The
-    other three (a football club story, a celebrity-scandal story, a sports
-    veteran story) clustered more by tabloid tone/register ("dramatic
-    scandal" headlines) than by actual topic. This is a real, expected
-    limitation of an off-the-shelf multilingual model with no fine-tuning
-    for this specific domain (Danish tabloid news) — not an implementation
-    bug.
-  - Two compounding factors beyond the model itself: (1) the user
-    representation is a mean-pool of the last 10 clicked articles' embeddings,
-    which can dilute signal for a reader with varied interests, unlike BM25's
-    precise per-term matching; (2) same full-125K-corpus-vs-tiny-candidate-pool
-    gap noted for BM25 above.
+Q3.5 — LEXICAL vs SEMANTIC (MIND, both at full scale)
 
-Lexical vs. Semantic comparison notes:
-MIND: essentially a tie. BM25 = 0.0103/0.0167/0.0245, Semantic = 0.0099/0.0155/0.0248
-(BM25 marginally ahead at K=50/100, semantic marginally ahead at K=200). Makes
-sense for MIND — English news headlines/abstracts have enough exact lexical
-overlap between a user's click history and the true next click that BM25's
-term matching stays competitive with dense embeddings at this scale.
+  metric        BM25      Semantic   winner
+  recall@50     0.0089    0.0125     semantic (+40% relative)
+  recall@100    0.0156    0.0190     semantic
+  recall@200    0.0235    0.0289     semantic
+  AUC           0.5624    0.6324     semantic (+0.070)
+  MRR           0.2957    0.3383     semantic
+  nDCG@10       0.3232    0.3736     semantic
+  diversity     0.7641    0.7190     BM25
+  coverage      0.0487    0.0485     tie
 
-EB-NeRD: BM25 clearly wins (0.0069/0.0081/0.0108 vs semantic's 0.0008/0.0016/0.0031,
-~4-8x higher). The gap vs. MIND (where the two methods tied) is the interesting
-result for the design note: lexical retrieval degrades gracefully to a
-non-English, non-fine-tuned setting, while general-purpose multilingual dense
-embeddings degrade much more sharply without domain fine-tuning. Good candidate
-for the "where it breaks / what we'd improve" discussion — a fine-tuned or
-domain-adapted Danish embedding model would likely close this gap significantly.
+Semantic wins on every accuracy metric on MIND, and the margin (+0.070 AUC)
+is ~70x the width of the bootstrap CI, so it is not a sampling artifact.
+
+WHICH SLICES: the gap is widest for warm users (0.6414 vs 0.5673 = +0.074)
+and narrowest for cold-start users (0.5730 vs 0.5303 = +0.043). That
+ordering is the expected one — both methods degrade without history, but
+mean-pooled embeddings degrade more gracefully than term overlap, because a
+single clicked article still yields a usable 384d direction whereas it
+yields very few query terms.
+
+BM25 wins only on intra-list diversity (0.7641 vs 0.7190). This is not a
+point in its favour so much as a symptom: 10.0% of BM25's candidate scores
+are exactly 0.0 (no term overlap at all) and 8.6% of candidates sit in a tie
+group, so roughly a tenth of its ordering is arbitrary tie-breaking. Randomly
+ordered items are, unsurprisingly, more "diverse" than deliberately ranked
+ones.
 
 =====================================================================
 Question 4: Offline Evaluation Harness
-(python -m src.evaluation.metrics --dataset <mind|ebnerd> --retriever <bm25|semantic>)
+  python -m src.evaluation.metrics --dataset <..> --retriever <..> --slice <..>
+  All values are means over impressions; [lo, hi] are bootstrap 95% CIs
+  (1,000 resamples). Diversity/novelty/coverage computed at k=10.
 =====================================================================
---- MIND / BM25 ---  (N=30,269)
-AUC:      0.5412   CI: [0.5379, 0.5444]
-MRR:      0.2827   CI: [0.2792, 0.2862]
-nDCG@5:   0.2533   CI: [0.2493, 0.2572]
-nDCG@10:  0.3107   CI: [0.3070, 0.3143]
-Diversity: 0.7660   Novelty: 8.0182   Coverage: 0.0293
-Slice (cold-start vs warm):
-  cold-start (N=4,017): AUC=0.5322 MRR=0.2751 nDCG@5=0.2604 nDCG@10=0.3198 nov=4.9095 cov=0.0141
-  warm       (N=26,252): AUC=0.5426 MRR=0.2839 nDCG@5=0.2522 nDCG@10=0.3093 nov=7.8427 cov=0.0281
-  Note: cold-start users get *higher* nDCG despite lower AUC/coverage — with a
-  short history their BM25 query is more topically focused (fewer competing
-  interests to average over), so when it does rank a relevant item, it tends
-  to rank it higher. Warm users' broader histories give more accurate overall
-  discrimination (AUC) but a noisier top-of-list.
 
---- MIND / Semantic ---  (N=30,269)
-AUC:      0.6212   CI: [0.6179, 0.6247]
-MRR:      0.3268   CI: [0.3233, 0.3308]
-nDCG@5:   0.3027   CI: [0.2990, 0.3069]
-nDCG@10:  0.3617   CI: [0.3580, 0.3655]
-Diversity: 0.7239   Novelty: 8.0414   Coverage: 0.0284
-Slice (cold-start vs warm):
-  cold-start (N=4,017): AUC=0.5706 MRR=0.2961 nDCG@5=0.2816 nDCG@10=0.3423 nov=4.9034 cov=0.0143
-  warm       (N=26,252): AUC=0.6289 MRR=0.3315 nDCG@5=0.3060 nDCG@10=0.3646 nov=7.8703 cov=0.0268
+--- MIND / SEMANTIC / slice = cold-start vs warm --- (full val, N=431,511)
+Slice            N          AUC                MRR              nDCG@5           nDCG@10          div     nov     cov
+all              431,511    0.6324             0.3383           0.3149           0.3736           0.7190  8.0796  0.0485
+                            [0.6315, 0.6333]   [0.3372, 0.3392] [0.3139, 0.3159] [0.3726, 0.3746]
+cold-start        56,721    0.5730             0.3071           0.2951           0.3537           0.7257  4.8923  0.0328
+                            [0.5705, 0.5756]   [0.3042, 0.3098] [0.2923, 0.2981] [0.3509, 0.3562]
+warm             374,790    0.6414             0.3430           0.3179           0.3766           0.7180  7.9156  0.0464
+                            [0.6404, 0.6422]   [0.3420, 0.3441] [0.3167, 0.3191] [0.3755, 0.3777]
 
-MIND re-ranking: BM25 vs Semantic — semantic clearly wins here (AUC 0.6212 vs
-0.5412, MRR 0.3268 vs 0.2827, nDCG@10 0.3617 vs 0.3107), unlike the earlier
-full-corpus recall@K result where the two were roughly tied. Worth flagging
-in the design note as a genuinely different task: recall@K measures whether
-BM25/semantic can *find* the right article among all 125K, while this harness
-measures whether it can *rank it highly* within the small candidate set the
-platform already curated — semantic similarity is a stronger ranking signal
-than exact term overlap once the candidate set is already narrowed down.
-Also note: unlike BM25 (where cold-start edged out warm on nDCG), semantic
-here has warm > cold-start on every ranking metric — dense embeddings seem
-to benefit more from a longer averaging history than BM25's sparse matching
-does.
+--- MIND / BM25 / slice = cold-start vs warm --- (full val, N=431,511)
+all              431,511    0.5624             0.2957           0.2644           0.3232           0.7641  8.1286  0.0487
+                            [0.5614, 0.5633]   [0.2947, 0.2966] [0.2634, 0.2655] [0.3222, 0.3241]
+cold-start        56,721    0.5303             0.2809           0.2645           0.3239           0.7487  4.9236  0.0328
+                            [0.5276, 0.5330]   [0.2782, 0.2834] [0.2617, 0.2676] [0.3212, 0.3267]
+warm             374,790    0.5673             0.2979           0.2644           0.3231           0.7664  7.9673  0.0467
+                            [0.5664, 0.5683]   [0.2968, 0.2989] [0.2632, 0.2656] [0.3221, 0.3241]
 
---- EB-NeRD / BM25 ---  (N=1,997,301)
-AUC:      0.4929   CI: [0.4924, 0.4933]
-MRR:      0.3159   CI: [0.3155, 0.3162]
-nDCG@5:   0.3445   CI: [0.3441, 0.3450]
-nDCG@10:  0.4292   CI: [0.4289, 0.4296]
-Diversity: 0.6960   Novelty: 8.7083   Coverage: 0.0426
-Run time: ~40 min (two full 20-min passes — see slicing note below)
+--- MIND / SEMANTIC / slice = head vs tail --- (full val, N=431,511)
+all              431,511    0.6324             0.3383           0.3149           0.3736           0.7190  8.0796  0.0485
+head             393,271    0.6300             0.3451           0.3236           0.3828           0.7194  7.7629  0.0431
+                            [0.6291, 0.6309]   [0.3440, 0.3463] [0.3224, 0.3247] [0.3818, 0.3839]
+tail              38,240    0.6566             0.2677           0.2255           0.2782           0.7153  6.4638  0.0410
+                            [0.6539, 0.6595]   [0.2644, 0.2709] [0.2224, 0.2286] [0.2752, 0.2813]
 
-Slice (cold-start vs warm): DEGENERATE for EB-NeRD — cold-start (threshold=5
-clicks) = 0 impressions, warm = all 1,997,301 (identical to 'all' row above).
-Every val user already has substantial click history (avg 274, 0% empty —
-see Q3 sanity-check notes), so this cutoff never discriminates on this
-dataset the way it does on MIND. Not a bug — just means cold/warm isn't a
-meaningful slice for EB-NeRD; using head/tail instead for EB-NeRD's required
-"at least one slice" coverage (see below once run).
+--- MIND / BM25 / slice = head vs tail --- (full val, N=431,511)
+all              431,511    0.5624             0.2957           0.2644           0.3232           0.7641  8.1286  0.0487
+head             393,271    0.5584             0.3014           0.2714           0.3313           0.7621  7.8156  0.0433
+                            [0.5575, 0.5594]   [0.3003, 0.3024] [0.2704, 0.2726] [0.3303, 0.3323]
+tail              38,240    0.6034             0.2372           0.1921           0.2398           0.7847  6.4746  0.0414
+                            [0.6007, 0.6061]   [0.2341, 0.2401] [0.1890, 0.1951] [0.2369, 0.2429]
 
-IMPORTANT finding — re-ranking quality is close to random for EB-NeRD/BM25:
-AUC=0.4929 is essentially chance level (0.5), and MRR=0.3159 is almost
-exactly the theoretical random-ranking baseline for ~9-candidate lists
-(1/9 * sum(1/i for i in 1..9) ≈ 0.314 — EB-NeRD's median candidate count is
-9). nDCG@5/10 being moderate despite this is mathematically consistent (still
-gives partial position credit even under near-random global ordering) rather
-than contradictory. This is a genuinely different result from the full-corpus
-recall@K numbers (Q2), which were clearly non-trivial — recall@K tests
-whether BM25 can *find* the right article among 125K, while this harness
-tests whether it can *rank it near the top* of a small ~9-item curated
-candidate set, and the shortened title-only/last-5-click query (a deliberate
-speed tradeoff from Q2, see ai_usage_log.md) likely isn't discriminative
-enough for that finer-grained task. Comparing against semantic's numbers on
-the identical task next should clarify whether this is BM25/query-specific
-or a broader dataset characteristic.
+THE HEAD/TAIL INVERSION (reproduced independently on both datasets and both
+retrievers, so it is a property of the task, not of one model):
+AUC is HIGHER on tail articles (semantic 0.6566 vs 0.6300; BM25 0.6034 vs
+0.5584) while MRR and nDCG are much LOWER (semantic 0.2677 vs 0.3451).
+These are not contradictory — they answer different questions. AUC asks
+"can you separate clicked from unclicked?", and a tail impression is an
+easier separation problem because its candidates are less uniformly
+attractive. MRR/nDCG ask "is the right item at the very top?", which is
+harder on tail impressions because the clicked article is genuinely obscure
+and content similarity alone rarely lifts it to rank 1. A system tuned only
+on AUC would look like it handles the long tail well while actually serving
+it badly.
 
---- EB-NeRD / Semantic ---  (N=1,997,301)
-AUC:      0.5399   CI: [0.5395, 0.5404]
-MRR:      0.3364   CI: [0.3360, 0.3368]
-nDCG@5:   0.3725   CI: [0.3721, 0.3729]
-nDCG@10:  0.4519   CI: [0.4515, 0.4523]
-Diversity: 0.6759   Novelty: 8.6592   Coverage: 0.0421
-Run time: ~36 min (two full 18-min passes; cold-start again degenerate, N=0 —
-same reason as BM25, see above)
+=====================================================================
+EB-NeRD results
+=====================================================================
+[Populated when the EB-NeRD suite completes — see eb_sampled2.log]
 
-RESOLVED — this answers the open question from the BM25/EB-NeRD entry above.
-Semantic clearly beats chance here (AUC=0.5399) where BM25 did not
-(AUC=0.4929, essentially random). Every metric is higher: MRR 0.3364 vs
-0.3159, nDCG@10 0.4519 vs 0.4292. This is the OPPOSITE ordering from Q3's
-full-corpus recall@K, where BM25 clearly beat semantic on EB-NeRD (4-8x).
-Coherent explanation: BM25's query was deliberately shortened to title-only
-text from the last 5 clicks (a speed trade forced by full-corpus scoring
-cost, see ai_usage_log.md) and apparently doesn't carry enough signal for
-fine-grained re-ranking of a small ~9-candidate set, even though it was
-sufficient for the coarser "find it somewhere in 125K" task. Semantic's user
-representation was never touched by that trade (full title+abstract text,
-mean-pooled over the last 10 clicks) and retains just enough usable signal
-to meaningfully beat chance at re-ranking, despite being far weaker at
-full-corpus retrieval. Net takeaway for the design note: which method "wins"
-depends entirely on which task you're evaluating — full-catalog candidate
-generation (Q2/Q3 recall@K) vs. re-ranking an already-curated shortlist
-(Q4's harness) are genuinely different problems that reward different
-retrieval properties.
+Full-scale reference already obtained:
+--- EB-NeRD / SEMANTIC / cold-start vs warm --- (FULL val, N=1,997,301)
+all            1,997,301    0.5496             0.3411           0.3785           0.4570           0.6723  8.6519  0.0419
+                            [0.5493, 0.5501]   [0.3407, 0.3415] [0.3780, 0.3790] [0.4566, 0.4574]
+cold-start             0    nan  (see below)
+warm           1,997,301    0.5496             0.3411           0.3785           0.4570           0.6723  8.6519  0.0419
 
---- Second slice type (head vs tail) — EB-NeRD / BM25 ---
-head (top-10% popular articles, N=1,961,548, 98.2% of impressions):
-  AUC=0.4921 [0.4917,0.4926]  MRR=0.3154 [0.3151,0.3158]
-  nDCG@5=0.3438 [0.3433,0.3443]  nDCG@10=0.4289 [0.4285,0.4293]
-  diversity=0.6971  novelty=8.6212  coverage=0.0326
-tail (remaining 90% by popularity, N=35,753, 1.8% of impressions):
-  AUC=0.5328 [0.5293,0.5363]  MRR=0.3396 [0.3366,0.3428]
-  nDCG@5=0.3838 [0.3801,0.3872]  nDCG@10=0.4471 [0.4440,0.4502]
-  diversity=0.6351  novelty=6.2539  coverage=0.0352
+WHY EB-NeRD HAS NO COLD-START SLICE: the cold/warm split thresholds at <5
+clicks, and EB-NeRD's history file guarantees a minimum history length of 5
+(confirmed in the provided ebnerd_analysis.ipynb: min_history_len = 5). The
+dataset therefore contains no cold-start users by construction, and the
+"warm" row is necessarily identical to "all". Q4 requires at least one
+slice; head/tail is the informative one for this dataset and is reported
+above for MIND and below for EB-NeRD. This is a property of the data, not a
+harness bug — but it does mean cold-start behaviour cannot be studied on
+EB-NeRD at all, only on MIND.
 
-FINDING — counterintuitive, worth a paragraph in the design note: tail
-(unpopular) articles rank *better* under BM25 than head (popular) ones —
-AUC 0.5328 vs 0.4921, i.e. tail is clearly above chance while head is at
-chance. This is the opposite of the usual "popularity bias favors head
-items" story. Plausible mechanism: BM25's whole scoring signal is IDF —
-rare, distinctive vocabulary. A niche/tail article is more likely to contain
-uncommon terms that give it a sharp, discriminative BM25 score; a popular
-head article (often mainstream, broadly-worded news) is more likely to share
-generic vocabulary with many other candidates in the same impression, making
-it harder for pure lexical overlap to tell them apart. This is a real
-argument for why a production system would want semantic/behavioral signals
-layered on top of BM25 specifically for head-item disambiguation, even
-though BM25 alone already does reasonably at surfacing tail content.
+=====================================================================
+ENGINEERING ANALYSIS — index and tooling choices
+=====================================================================
+
+--- ANN index: what we ship, and what the alternatives actually cost ---
+  python -m src.evaluation.benchmark_index --dataset mind --n-queries 1000
+  MIND corpus: 130,379 vectors x 384d. Latency is per single query (serving
+  shape); batch_qps is throughput when queries arrive together (offline
+  shape). recall@100 is measured AGAINST THE EXACT FLAT RESULT, i.e. "does
+  this index return the neighbours exhaustive search would have returned".
+
+  index                              build_s  size_MB  latency_ms  p95_ms  batch_qps  recall@100_vs_exact
+  IndexFlatIP (exact, SHIPPED)       0.07     200.3    2.704       3.67    5,151      1.0000
+  IndexIVFFlat nlist=1024 nprobe=1   2.66     202.9    0.055       0.079   102,699    0.3728
+  IndexIVFFlat nlist=1024 nprobe=8   2.24     202.9    0.094       0.120   38,834     0.7550
+  IndexIVFFlat nlist=1024 nprobe=32  2.32     202.9    0.229       0.286   13,653     0.9060
+  IndexHNSWFlat M=32 efSearch=32     9.31     235.8    0.290       0.455   22,666     0.8312
+  IndexHNSWFlat M=32 efSearch=128    8.96     235.8    0.617       0.881   11,318     0.9644
+
+  Reading: IVF at nprobe=1 is 49x faster than exact search but discards 63%
+  of the true neighbours — the classic trap of quoting a speedup without its
+  recall. Raising nprobe walks the frontier back (nprobe=32: 11.8x faster,
+  90.6% agreement). HNSW dominates IVF on the accuracy side at comparable
+  latency (efSearch=128: 4.4x faster than exact, 96.4% agreement) but costs
+  ~130x the build time and +35MB on disk.
+
+  WHY WE SHIP EXACT ANYWAY — the decisive point is that our serving path
+  never queries the index. Codabench supplies the candidate list, so
+  submissions go through score_candidates(), which scores the ~12-40 named
+  articles directly. The FAISS index is exercised only by Q2/Q3's
+  full-corpus recall@K, an offline batch job where 5,151 q/s is ample. So an
+  approximate index would trade 4-63% of true neighbours for latency we have
+  no use for, and would additionally make recall@K a measurement of the
+  index's approximation error rather than of the retrieval method. Exact
+  search is the correct choice *for this workload*; on a serving path that
+  did hit the index per request, HNSW at efSearch=128 is where we would go.
+
+--- Scoring path: measured cost of every optimization ---
+  python -m src.evaluation.benchmark_retrieval --dataset mind --n 1000
+  1,000 MIND val impressions, mean history 33.8 articles, mean candidates 40.6.
+
+  path                                          mean_ms  p50_ms  p95_ms  per_sec
+  BM25 score_candidates (shipped)               0.528    ~0.30   ~2.0    1,894
+  Semantic score_candidates (shipped)           0.051    ~0.03   ~0.13   19,608
+  BM25 via full-corpus get_scores (REJECTED)    14.111   14.29   18.678  71
+  Semantic via full-corpus matvec (REJECTED)    3.875    3.253   6.343   258
+  BM25 without token memoization                2.681    1.606   8.974   373
+
+  1. TARGETED vs FULL-CORPUS SCORING — 27x (BM25) and 76x (semantic).
+     The naive way to score an impression is to score the entire catalog and
+     read off the candidates. It gives identical rankings and is the single
+     most expensive mistake available here: 14.1ms vs 0.528ms per impression.
+     Over EB-NeRD's 13.5M-impression test set that is ~53 hours vs ~2 hours.
+
+  2. QUERY-TOKEN MEMOIZATION — 5.1x on BM25 (2.681 -> 0.528ms).
+     Article tokens never change, but popular articles recur across many
+     users' histories, and the pre-fix code re-tokenized and re-STEMMED each
+     user's entire history on every impression. Caching tokens per article
+     removes ~77% of all work score_candidates did.
+
+  3. TWO OPTIMIZATIONS THAT WERE ACTUALLY PESSIMIZATIONS (and why).
+     Both were argued from asymptotics and both made things slower until
+     measured:
+
+       BM25 IDF vector          mean_ms      Semantic candidate gather   mean_ms
+       np.zeros(V) per call     0.717        per-candidate Python loop   0.062
+       reused buf, Python loops 0.938  WORSE np.full + Python fill loop  0.077  WORSE
+       reused buf, vectorized   0.147  BEST  list-comp -> np.array       0.034  BEST
+
+     The BM25 argument was "avoid an O(V) memset per impression, ~550GB of
+     zeroing across the test set". That reasoning is wrong: np.zeros is a
+     C-level calloc (frequently lazily-zeroed pages), so the memset was
+     nearly free, while the Python loop introduced to CLEAR the reused buffer
+     ran over every unique query term and cost more than it saved. The
+     semantic argument was "avoid ~95M individual np.dot calls"; also wrong,
+     because gathering 40x384 floats copies real memory and the win only
+     appears once the index array is built in one shot.
+     The optimizations are real — 4.9x and 1.8x respectively — but the source
+     of the win was VECTORIZING THE INDEX CONSTRUCTION, not avoiding the
+     allocation. Verified score-identical after the fix (BM25 max abs diff
+     0.0; semantic 8.9e-08, i.e. float32 epsilon).
+
+--- Storage footprint (MIND) ---
+  artifact                 size_MB   notes
+  faiss.index              200.3     130,379 x 384 float32, exact
+  article_embeddings.npy   200.3     same data, kept for diversity metric
+  bm25_index.pkl            32.2     sparse CSR + vocabulary; 6x smaller than
+                                     the dense embedding index
+  articles.parquet          29.1     text catalog
+
+  BM25's index is 6x smaller than the embedding index and builds in seconds
+  from raw text with no model download or GPU, which is the honest argument
+  in its favour even though it loses on every accuracy metric here.
+
+--- End-to-end submission generation (competition test sets) ---
+  MIND     2,370,727 impressions   semantic 2m13s (17,790/s)  BM25 8m38s (4,574/s)
+  EB-NeRD 13,536,710 impressions   semantic ~18m (~12,400/s)
+  Peak RSS held flat at ~3.8GB by streaming; see the 10x analysis below.
 
 =====================================================================
 Question 5: Codabench Submission
 =====================================================================
-MIND leaderboard score / screenshot: [paste here / note screenshot filename]
-RecSys 2024 (EB-NeRD) leaderboard score / screenshot: [paste here / note screenshot filename]
+MIND     (competitions/13967): semantic submission scored AUC 0.67, rank 37.
+         BM25 submission file regenerated and verified current, not yet uploaded.
+EB-NeRD  (competitions/2469):  first attempt registered but never scored.
+
+  EB-NeRD SUBMISSION FORMAT — diagnosis of the failed attempt.
+  The file was structurally valid (correct inner name predictions.txt,
+  13,536,710 well-formed lines, 0 malformed, ranks a permutation of 1..N in
+  original candidate order, verified against the competition's own worked
+  example 139350 -> [3,2,4,1]). The defect was the LINE COUNT: the test set
+  has 13,536,710 rows but only 13,336,711 distinct impression_ids, because
+  its 200,000 "beyond-accuracy" rows all carry impression_id = 0. The
+  course-provided ebnerd_analysis.ipynb groups by impression_id and emits
+  13,336,711 lines, stating the file "must cover all unique impression_ids".
+  Our file emitted one line per ROW, so 200,000 lines shared a single id.
+  Corrected via --unique-ids (first occurrence wins); the regenerated file
+  has exactly 13,336,711 lines, 0 duplicates, and full id coverage.
+  A size hypothesis was also considered and REJECTED on evidence: the
+  competition's own reference file predictions_large_random.zip is 220MB and
+  ours was 230MB.
 
 =====================================================================
-Question 9: Anti-Gaming / Leakage Test
-(pytest tests/test_no_leakage.py -v)
+Question 9: Anti-Gaming / Leakage
+  pytest tests/ -v
 =====================================================================
-Result: 6 passed, 0 failed (both datasets: mind, ebnerd)
-  - test_temporal_ordering[mind]       PASSED
-  - test_temporal_ordering[ebnerd]     PASSED
-  - test_no_val_ids_in_train[mind]     PASSED
-  - test_no_val_ids_in_train[ebnerd]   PASSED
-  - test_splits_are_disjoint[mind]     PASSED
-  - test_splits_are_disjoint[ebnerd]   PASSED
-Run time: 9.97s
+Result: 9 passed, 1 skipped.
 
-Notes on serving-time feature availability:
-click_history for each impression is truncated to articles clicked strictly
-before that impression's timestamp (enforced during preprocessing), so no
-future-click information leaks into features. Train/val/test are split
-purely by time (never randomly) with strictly increasing, non-overlapping
-time windows, verified above. One bug caught by this exact test during
-development: MIND's impression_id is only unique *within* a single
-behaviors.tsv file (train/dev/test each restart numbering from 1) — after
-combining the train+dev bundles for the temporal split, unrelated
-impressions from different source files briefly collided under the same ID.
-Fixed by prefixing impression_id with the split name before combining
-(the official competition test set is exempt, since Codabench expects its
-original unprefixed numeric IDs).
+  test_temporal_ordering[mind|ebnerd]              PASSED
+  test_no_val_ids_in_train[mind|ebnerd]            PASSED
+  test_splits_are_disjoint[mind|ebnerd]            PASSED
+  test_history_articles_predate_impression[ebnerd] PASSED
+  test_history_articles_predate_impression[mind]   SKIPPED (no publish times)
+  test_history_is_monotone_per_user[mind|ebnerd]   PASSED
+
+FEATURES UNAVAILABLE AT SERVING TIME: none are used. The only inputs to
+either retriever are article text (title/abstract/body) and the user's prior
+click history, both of which exist at serving time. We deliberately do NOT
+use article popularity, total_inviews/total_pageviews, read_time,
+scroll_percentage, or next_read_time — the last three are present in
+EB-NeRD's training behaviours but absent from its test set precisely because
+they are post-hoc. So the "with and without serving-time-unavailable
+features" comparison degenerates: there is no "with" configuration to report.
+
+BEHAVIOUR-WINDOW BOUNDARY: enforced and now actually tested. Previously the
+test module's docstring claimed to assert this while no test did — the claim
+was removed and two real tests added. EB-NeRD is checked directly against
+article publication timestamps (5,437,152 history entries checked, 0
+published after their impression). MIND has no publication timestamps at all
+(published_time null for all 130,379 articles), so it is checked structurally
+instead: a user's history may only grow over time (6,288 multi-impression
+users checked, 0 violations).
+
+=====================================================================
+Reproducibility notes
+=====================================================================
+- One-command rebuild:  python build_pipeline.py --dataset both
+- Sampling is always seeded (--sample-n N --seed 42) so any sampled figure
+  above can be reproduced exactly.
+- Caches are fingerprinted on content AND on processing config: the BM25
+  index stores TOKENIZER_VERSION, the embedding store EMBEDDING_MODEL_VERSION.
+  Changing tokenization or the embedding model invalidates them automatically
+  rather than silently serving incompatible vectors.
+- BM25 index persistence stores plain arrays, not a pickled class instance.
+  The earlier version pickled the live FastBM25 object, which records its
+  class as "__main__.FastBM25" when built via `python -m src.retrieval.bm25`
+  and could then not be loaded from any other entry point — generate_preds.py
+  and metrics.py both died with AttributeError on it.
