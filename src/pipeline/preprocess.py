@@ -142,13 +142,21 @@ def preprocess_mind(split: str = "train") -> tuple[pd.DataFrame, pd.DataFrame]:
     # Since the zip extraction might dump them flat, we try specific subdirs first.
     # We map 'train' -> 'small_train' or 'large_train' based on what exists,
     # or just use the raw dir if the user unzipped manually.
-    
+    #
+    # Prefer large over small when both are present. Both bundles were
+    # downloaded this session, but small_{split} used to be checked first —
+    # since both exist on disk, that silently built the entire pipeline
+    # (BM25 index, embeddings, every offline recall@K/AUC number) on
+    # MIND-small's much smaller population instead of MIND-large's, which is
+    # what the real Codabench test set is actually drawn from. The
+    # assignment's own guidance is explicit that small/demo is for
+    # "development and debugging" only.
     candidates = [
-        MIND_RAW_DIR / f"MINDsmall_{split}",
         MIND_RAW_DIR / f"MINDlarge_{split}",
+        MIND_RAW_DIR / f"MINDsmall_{split}",
         MIND_RAW_DIR / split,
-        MIND_RAW_DIR / f"small_{split}",
         MIND_RAW_DIR / f"large_{split}",
+        MIND_RAW_DIR / f"small_{split}",
         MIND_RAW_DIR
     ]
     
