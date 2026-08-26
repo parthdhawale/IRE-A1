@@ -60,15 +60,39 @@ DANISH_STOPWORDS = {
 STOPWORDS = ENGLISH_STOPWORDS | DANISH_STOPWORDS
 
 
-def tokenize(text: str) -> list[str]:
-    """Lowercase, split on word boundaries, remove stopwords."""
+def get_stemmer(dataset: str):
+    """Snowball stemmer matched to the dataset's language.
+
+    Addresses a limitation documented in report.txt: BM25 with no stemming
+    disadvantages Danish (rich compounding/inflection — "artikler"/"artikel",
+    "løbet"/"løb") more than it does English. NLTK's Snowball implementation
+    is a pure rule-based algorithm bundled with the nltk package itself — it
+    needs no nltk.download() or external corpus, unlike e.g. WordNetLemmatizer
+    or the punkt tokenizer, so this has no extra runtime data dependency
+    beyond `pip install nltk`."""
+    from nltk.stem.snowball import SnowballStemmer
+    return SnowballStemmer("danish" if dataset == "ebnerd" else "english")
+
+
+def tokenize(text: str, stemmer=None) -> list[str]:
+    """Lowercase, split on word boundaries, remove stopwords, optionally stem.
+
+    Stopwords are filtered before stemming (the stopword lists above are
+    written in unstemmed form and already include major inflected variants
+    manually, e.g. Danish "har"/"havde" both listed) — stemming afterwards
+    normalizes remaining content words without needing every inflection of
+    every stopword enumerated by hand.
+    """
     if not isinstance(text, str):
         return []
     # Include Danish æ/ø/å — an ASCII-only [a-z] class silently splits Danish
     # words around them into meaningless fragments (e.g. "være" -> "re",
     # "også" -> "ogs"), which both loses real lexical signal and pollutes the
     # vocabulary with garbage high-document-frequency "terms".
-    return [t for t in re.findall(r"[a-zæøå]{2,}", text.lower()) if t not in STOPWORDS]
+    tokens = [t for t in re.findall(r"[a-zæøå]{2,}", text.lower()) if t not in STOPWORDS]
+    if stemmer is not None:
+        tokens = [stemmer.stem(t) for t in tokens]
+    return tokens
 
 
 class FastBM25:
@@ -133,6 +157,37 @@ class FastBM25:
         )
         log.info("    Sparse matrix built.")
 
+    # ── Persistence ────────────────────────────────────────────────────────────
+    #
+    # Pickling a FastBM25 *instance* records its class by qualified name. When
+    # the index is built via `python -m src.retrieval.bm25`, that name is
+    # "__main__.FastBM25" — so the resulting file could only ever be reloaded
+    # from that same entry point, and unpickling it from generate_preds.py or
+    # metrics.py died with "Can't get attribute 'FastBM25' on module
+    # '__main__'". Persisting plain arrays/dicts instead makes the cache
+    # independent of which script built it.
+
+    def to_state(self) -> dict:
+        """Serialize to primitives (no class identity baked in)."""
+        return {
+            "k1": self.k1,
+            "b": self.b,
+            "corpus_size": self.corpus_size,
+            "doc_len": self.doc_len,
+            "avgdl": self.avgdl,
+            "term2id": self.term2id,
+            "idf": self.idf,
+            "tf_matrix": self.tf_matrix,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "FastBM25":
+        """Rebuild from to_state() output without re-running __init__."""
+        obj = cls.__new__(cls)
+        for key, value in state.items():
+            setattr(obj, key, value)
+        return obj
+
     def _query_matrix(self, query_term_ids: list[list[int]]) -> csr_matrix:
         """Build the (Q, V) sparse query matrix (unique terms × IDF weight)."""
         Q = len(query_term_ids)
@@ -181,6 +236,29 @@ class FastBM25:
         return batch[0]
 
 
+# Bump whenever tokenize()'s behavior changes (stemming added/removed,
+# stopword list edited, regex changed, etc). The cached index fingerprints
+# this alongside the article-ID set — without it, adding stemming here would
+# silently keep serving an old, non-stemmed index whenever the article
+# catalog itself happened not to have changed (same bug class as the
+# article-set staleness check below, just for tokenization instead of data).
+TOKENIZER_VERSION = "stemmed-v1"
+
+# How many of a user's most recent clicks to concatenate into their BM25
+# query. None = the entire click history.
+#
+# This was 10, which measurably threw away signal: on a fixed 20K-impression
+# MIND val sample, querying with the full history scored AUC 0.5640 vs 0.5544
+# for the last 10 (+0.010). Last-30 and last-50 both landed at 0.5635, so the
+# gain saturates but never reverses — matching the same experiment on the
+# semantic side (see USER_HISTORY_LIMIT in semantic.py).
+#
+# Note the asymmetric cost documented in _build_query_tokens: longer queries
+# are cheap in score_candidates() but expensive in evaluate()'s full-corpus
+# recall@K search, so recall@K should be re-measured after changing this.
+QUERY_HISTORY_LIMIT: int | None = None
+
+
 class BM25Retriever:
     def __init__(self, dataset: str):
         assert dataset in ("mind", "ebnerd"), f"Unknown dataset: {dataset}"
@@ -191,6 +269,9 @@ class BM25Retriever:
         self._corpus_id_to_idx: dict[str, int] = {}
         self._articles_lookup: dict[str, dict] = {}
         self._index_path = self.proc_dir / "bm25_index.pkl"
+        self._stemmer = get_stemmer(dataset)
+        self._q_idf_buffer: np.ndarray | None = None  # see score_candidates()
+        self._article_token_cache: dict[str, list[str]] = {}  # see _article_query_tokens()
 
     # ── Build ──────────────────────────────────────────────────────────────────
 
@@ -205,29 +286,47 @@ class BM25Retriever:
 
         if not force and self._index_path.exists():
             log.info(f"  Loading cached BM25 index from {self._index_path}")
-            with open(self._index_path, "rb") as f:
-                state = pickle.load(f)
+            # An index written by the older code pickled a live FastBM25
+            # instance, which records its class by qualified name — built via
+            # `python -m src.retrieval.bm25` that name is "__main__.FastBM25",
+            # so pickle.load() raises AttributeError from any other entry
+            # point. A cache we cannot read is simply a cache miss; rebuild
+            # rather than taking the whole run down with it.
+            state = None
+            try:
+                with open(self._index_path, "rb") as f:
+                    state = pickle.load(f)
+            except Exception as e:
+                log.warning(f"  Cached index is unreadable ({e}) — rebuilding.")
             # articles.parquet can change (e.g. re-running preprocessing after
             # a fix) without the cached index knowing — reusing it silently
             # would score against a stale, mismatched corpus. Only trust the
-            # cache if its article set still matches exactly.
-            if state.get("article_ids") == current_ids:
-                self.bm25 = state["bm25"]
+            # cache if its article set AND its tokenization config both match.
+            if (
+                state is not None
+                and "bm25_state" in state
+                and state.get("article_ids") == current_ids
+                and state.get("tokenizer_version") == TOKENIZER_VERSION
+            ):
+                self.bm25 = FastBM25.from_state(state["bm25_state"])
                 self.corpus_ids = state["corpus_ids"]
                 self._corpus_id_to_idx = {aid: i for i, aid in enumerate(self.corpus_ids)}
                 log.info(f"  Loaded index: {len(self.corpus_ids):,} articles")
                 return
-            log.warning(
-                f"  Cached index ({len(state.get('corpus_ids', [])):,} articles) doesn't match "
-                f"the current article catalog ({len(current_ids):,} articles) — rebuilding."
-            )
+            if state is not None:
+                log.warning(
+                    f"  Cached index ({len(state.get('corpus_ids', [])):,} articles, "
+                    f"tokenizer={state.get('tokenizer_version', '<none>')}) doesn't match "
+                    f"the current article catalog ({len(current_ids):,} articles, "
+                    f"tokenizer={TOKENIZER_VERSION}) — rebuilding."
+                )
 
         self.corpus_ids = articles["article_id"].tolist()
         self._corpus_id_to_idx = {aid: i for i, aid in enumerate(self.corpus_ids)}
 
         log.info(f"  Building BM25 index over {len(self.corpus_ids):,} articles...")
         corpus_tokens = [
-            tokenize(f"{row['title']} {row['abstract']} {row['body']}")
+            tokenize(f"{row['title']} {row['abstract']} {row['body']}", stemmer=self._stemmer)
             for _, row in articles.iterrows()
         ]
 
@@ -235,7 +334,13 @@ class BM25Retriever:
 
         with open(self._index_path, "wb") as f:
             pickle.dump(
-                {"bm25": self.bm25, "corpus_ids": self.corpus_ids, "article_ids": current_ids}, f
+                {
+                    "bm25_state": self.bm25.to_state(),
+                    "corpus_ids": self.corpus_ids,
+                    "article_ids": current_ids,
+                    "tokenizer_version": TOKENIZER_VERSION,
+                },
+                f,
             )
         log.info(f"  BM25 index saved to {self._index_path}")
 
@@ -245,21 +350,54 @@ class BM25Retriever:
         self,
         click_history: list[str],
         articles_lookup: dict,
-        max_recent: int = 5,
+        max_recent: int | None = QUERY_HISTORY_LIMIT,
     ) -> list[str]:
-        """Concatenate titles of the N most recently clicked articles (as the
-        assignment spec suggests) into the query.
+        """Concatenate title + abstract of the user's clicked articles into
+        the query (assignment spec: "e.g., concatenate titles of recently
+        clicked articles" — abstract adds real lexical signal without
+        changing the approach). max_recent=None uses the whole history; see
+        QUERY_HISTORY_LIMIT.
 
-        Titles only, and only the last 5 articles — not title+abstract of the
-        last 10 (the original design): that produced queries averaging ~120
-        unique terms, whose posting-list union covers ~95% of the whole
-        125K-article corpus regardless of stopword filtering, making every
-        query effectively dense and evaluation intractable at 2M queries.
-        A short, title-only query is both the assignment's literal suggestion
-        and keeps queries genuinely selective."""
-        recent = click_history[-max_recent:]
-        titles = [articles_lookup.get(aid, {}).get("title", "") for aid in recent]
-        return tokenize(" ".join(titles))
+        This full-richness query is safe everywhere candidates are scored via
+        score_candidates() — retrieve(), the Q4 eval harness, and real
+        prediction generation all only score a given small candidate list, so
+        cost scales with the query's term count, not the corpus size. It only
+        gets expensive in one specific path: evaluate()'s full-corpus
+        recall@K search (Q2), where a richer query against EB-NeRD's 125K+
+        Danish articles was measured to make every query's score row ~95%
+        dense — see ai_usage_log.md. Validate recall@K changes to this method
+        on a *sample* of queries there, not the full 2M-query val set."""
+        recent = click_history if max_recent is None else click_history[-max_recent:]
+        tokens: list[str] = []
+        for aid in recent:
+            tokens.extend(self._article_query_tokens(aid, articles_lookup))
+        return tokens
+
+    def _article_query_tokens(self, article_id: str, articles_lookup: dict) -> list[str]:
+        """Tokenized title+abstract for one article, memoized across calls.
+
+        An article's tokens never change, but a popular article appears in
+        many users' histories — and previously every impression re-tokenized
+        and re-*stemmed* its whole history from raw text. With the full
+        history now in play (~40 articles/impression) that dominated the cost
+        of scoring: measured over 2000 MIND impressions, rebuilding query
+        tokens took 3.66s uncached vs 0.01s memoized, i.e. 77% of all the work
+        score_candidates did. Memoizing cut end-to-end scoring 4.4x (a
+        projected 93 -> 21 min over the 2.37M-impression competition test
+        set).
+
+        Concatenating per-article token lists is equivalent to tokenizing the
+        joined string: the tokenizer's [a-zæøå]{2,} pattern cannot match
+        across the whitespace that separated the fields anyway.
+        """
+        cached = self._article_token_cache.get(article_id)
+        if cached is None:
+            art = articles_lookup.get(article_id, {})
+            cached = tokenize(
+                f"{art.get('title', '')} {art.get('abstract', '')}", stemmer=self._stemmer
+            )
+            self._article_token_cache[article_id] = cached
+        return cached
 
     def retrieve(self, click_history: list[str], k: int = 100) -> list[str]:
         """Return top-k article IDs (from the full corpus) for a single user."""
@@ -301,13 +439,31 @@ class BM25Retriever:
         if not valid_positions:
             return [0.0] * len(candidate_ids)
 
-        q_idf = np.zeros(len(self.bm25.term2id), dtype=np.float32)
-        for tid in set(tids):
-            q_idf[tid] = self.bm25.idf[tid]
+        # Reuse one vocabulary-width scratch vector across calls: write only
+        # the query's terms, score, then zero just those terms again, leaving
+        # the buffer clean for the next call.
+        #
+        # Both halves must be NumPy fancy-indexing, not Python loops. Measured
+        # on 1,000 MIND impressions (benchmark_retrieval.py):
+        #     np.zeros(V) allocated per call        0.717 ms
+        #     reused buffer, per-term Python loops  0.938 ms   <- WORSE
+        #     reused buffer, vectorized set/clear   0.147 ms   <- shipped
+        # The first version of this optimization used Python loops and was
+        # slower than the allocation it replaced: np.zeros is a C-level calloc
+        # (often lazily zeroed by the OS), whereas looping in Python over the
+        # few hundred to few thousand unique query terms is not free. The win
+        # is real, but it comes from vectorizing, not from avoiding the memset.
+        if self._q_idf_buffer is None or len(self._q_idf_buffer) != len(self.bm25.term2id):
+            self._q_idf_buffer = np.zeros(len(self.bm25.term2id), dtype=np.float32)
+        q_idf = self._q_idf_buffer
+        unique_tids = np.fromiter(set(tids), dtype=np.int64)
+        q_idf[unique_tids] = self.bm25.idf[unique_tids]
 
         valid_idxs = [cand_idxs[i] for i in valid_positions]
         sub_tf = self.bm25.tf_matrix[valid_idxs]  # (n_valid, V) sparse — just these rows
         scores_valid = sub_tf.dot(q_idf)  # small dense (n_valid,) result
+
+        q_idf[unique_tids] = 0.0
 
         scores = [0.0] * len(candidate_ids)
         for pos, val in zip(valid_positions, scores_valid):
@@ -413,6 +569,14 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", choices=["mind", "ebnerd"], default="mind")
     parser.add_argument("--k", nargs="+", type=int, default=[50, 100, 200])
     parser.add_argument("--force-rebuild", action="store_true")
+    parser.add_argument(
+        "--sample-n", type=int, default=None,
+        help="Measure recall@K on a seeded random sample of this many queries "
+             "instead of the whole val split. This is a FULL-CORPUS search, so "
+             "its cost scales with queries x catalog; on EB-NeRD (2M queries, "
+             "125K articles, ~267-article histories) a full pass is multi-hour.",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     from src.pipeline.feature_store import load_split
@@ -421,6 +585,9 @@ if __name__ == "__main__":
     retriever.build(force=args.force_rebuild)
 
     val_df = load_split(args.dataset, "val")
+    if args.sample_n is not None and args.sample_n < len(val_df):
+        val_df = val_df.sample(n=args.sample_n, random_state=args.seed).reset_index(drop=True)
+        log.info(f"  Sampled {len(val_df):,} queries (seed={args.seed})")
     results = retriever.evaluate(val_df, k_values=args.k)
     print("\nBM25 Recall@K Results:")
     for metric, value in results.items():
