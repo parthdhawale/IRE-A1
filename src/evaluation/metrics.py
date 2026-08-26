@@ -310,6 +310,15 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=10, help="Cutoff for diversity/novelty/coverage")
     parser.add_argument("--slice", choices=["cold_warm", "head_tail"], default="cold_warm")
     parser.add_argument("--force-rebuild", action="store_true")
+    parser.add_argument(
+        "--sample-n", type=int, default=None,
+        help="Evaluate a random sample of this many impressions instead of the whole "
+             "split (seeded, so runs are reproducible and comparable). EB-NeRD's val "
+             "split is ~2M impressions and a full pass costs ~1h per retriever; at "
+             "N=250,000 the bootstrap 95%% CI on AUC is still ~+/-0.001, an order of "
+             "magnitude tighter than any effect reported here.",
+    )
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     from src.pipeline.feature_store import load_split
@@ -323,6 +332,9 @@ if __name__ == "__main__":
     retriever.build(force=args.force_rebuild)
 
     val_df = load_split(args.dataset, args.split)
+    if args.sample_n is not None and args.sample_n < len(val_df):
+        val_df = val_df.sample(n=args.sample_n, random_state=args.seed).reset_index(drop=True)
+        log.info(f"  Evaluating a seeded random sample: {len(val_df):,} impressions (seed={args.seed})")
 
     harness = EvaluationHarness(args.dataset)
     reports = harness.run(val_df, retriever, k=args.k, slice_by=args.slice)
