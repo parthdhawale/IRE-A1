@@ -47,3 +47,12 @@ env/
 *.log
 tmp/
 temp/
+
+# ── LaTeX build artifacts ─────────────────────────────────────────────────────
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+design_note.pdf
+design_note.html
