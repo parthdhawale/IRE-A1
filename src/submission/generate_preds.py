@@ -96,43 +96,76 @@ def iter_impression_batches(path: Path, batch_size: int = 100_000):
         yield batch.to_pandas()
 
 
-def generate_prediction_lines(retriever, path: Path, total_rows: int) -> list[str]:
-    """Score every impression's own candidates and format each as one
-    'ImpressionID [rank1,rank2,...]' line — the shared format both
-    competitions require (see module docstring)."""
-    lines = []
+def iter_prediction_lines(retriever, path: Path, total_rows: int, unique_ids: bool = False):
+    """Yield one 'ImpressionID [rank1,rank2,...]' line per impression — the
+    shared format both competitions require (see module docstring).
+
+    A generator, not a list: EB-NeRD's competition test set is 13.5M
+    impressions, and holding every formatted line in memory before writing
+    cost ~15GB (MIND's 2.37M lines already peaked ~2.8GB). Scoring was
+    already streamed in row-group batches, so the output path was the only
+    remaining part whose memory grew with the row count.
+
+    unique_ids: emit one line per DISTINCT impression_id (first occurrence
+    wins) rather than one per row. EB-NeRD's test set repeats impression_id=0
+    across all 200,000 "beyond-accuracy" rows, so a row-per-line file carries
+    200k lines sharing one id; the course-provided ebnerd_analysis.ipynb
+    instead groups by impression_id and writes 13,336,711 lines, stating that
+    the file "must cover all unique impression_ids". This flag reproduces
+    that. MIND has no duplicate ids, so it is a no-op there.
+    """
+    seen: set = set()
     with tqdm(total=total_rows, desc="  Scoring", ncols=80) as bar:
         for batch_df in iter_impression_batches(path):
             for _, row in batch_df.iterrows():
+                impression_id = row["impression_id"]
+                if unique_ids:
+                    if impression_id in seen:
+                        continue
+                    seen.add(impression_id)
                 scores = _score_row(retriever, row)
                 ranks = ranks_in_original_order(scores)
                 rank_str = ",".join(str(r) for r in ranks)
-                lines.append(f"{row['impression_id']} [{rank_str}]")
+                yield f"{impression_id} [{rank_str}]"
             bar.update(len(batch_df))
-    return lines
 
 
-def write_submission_zip(lines: list[str], zip_path: Path, inner_filename: str):
-    """Zip `lines` as the single file `inner_filename` — nothing else in the
-    archive, no folder wrapper, no __MACOSX — matching both competitions'
-    'a valid zip submission should contain nothing but...' requirement."""
+def write_submission_zip(lines, zip_path: Path, inner_filename: str):
+    """Stream `lines` into the single file `inner_filename` — nothing else in
+    the archive, no folder wrapper, no __MACOSX — matching both competitions'
+    'a valid zip submission should contain nothing but...' requirement.
+
+    Accepts any iterable (including the generator above) and writes through
+    an open zip member so neither the joined text nor the line list is ever
+    fully materialized."""
     PREDICTIONS_DIR.mkdir(exist_ok=True)
+    written = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(inner_filename, "\n".join(lines))
-    log.info(f"  Saved submission zip → {zip_path}  (contains {inner_filename})")
+        info = zipfile.ZipInfo(inner_filename)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        with zf.open(info, "w") as fh:
+            for i, line in enumerate(lines):
+                if i:
+                    fh.write(b"\n")
+                fh.write(line.encode())
+                written += 1
+    log.info(f"  Saved submission zip → {zip_path}  ({written:,} lines in {inner_filename})")
+    return written
 
 
-def generate_mind_predictions(retriever, path: Path, total_rows: int, output_path: Path):
+def generate_mind_predictions(retriever, path: Path, total_rows: int, output_path: Path,
+                              unique_ids: bool = False):
     """Generate a MIND submission zip (inner file must be named prediction.txt)."""
     log.info(f"  Generating MIND predictions for {total_rows:,} impressions...")
-    lines = generate_prediction_lines(retriever, path, total_rows)
+    lines = iter_prediction_lines(retriever, path, total_rows, unique_ids)
     write_submission_zip(lines, output_path, "prediction.txt")
 
 
-def generate_ebnerd_predictions(retriever, path: Path, total_rows: int, output_path: Path):
+def generate_ebnerd_predictions(retriever, path: Path, total_rows: int, output_path: Path,
+                                unique_ids: bool = False):
     """Generate an EB-NeRD submission zip (inner file must be named predictions.txt)."""
     log.info(f"  Generating EB-NeRD predictions for {total_rows:,} impressions...")
-    lines = generate_prediction_lines(retriever, path, total_rows)
+    lines = iter_prediction_lines(retriever, path, total_rows, unique_ids)
     write_submission_zip(lines, output_path, "predictions.txt")
 
 
@@ -147,6 +180,18 @@ if __name__ == "__main__":
         help="Which split to predict on. 'competition_test' (default) is the "
              "official unlabeled Codabench test set; 'test' is our own internal "
              "temporal test split (labeled, NOT for actual submission).",
+    )
+    parser.add_argument(
+        "--unique-ids", action="store_true",
+        help="Emit one line per DISTINCT impression_id (first occurrence wins). "
+             "EB-NeRD's test set repeats impression_id=0 across its 200,000 "
+             "'beyond-accuracy' rows; the course-provided ebnerd_analysis.ipynb "
+             "groups by impression_id and writes 13,336,711 lines, stating the "
+             "file must cover all unique impression_ids. No-op for MIND.",
+    )
+    parser.add_argument(
+        "--suffix", default="",
+        help="Appended to the output filename, to keep submission variants side by side.",
     )
     args = parser.parse_args()
 
@@ -165,11 +210,13 @@ if __name__ == "__main__":
     split_path = resolve_split_path(args.dataset, args.split)
     total_rows = pq.ParquetFile(split_path).metadata.num_rows
 
+    if args.unique_ids:
+        log.warning("  --unique-ids: writing one line per DISTINCT impression_id (first occurrence wins).")
+
+    out = PREDICTIONS_DIR / f"{args.dataset}_{args.retriever}{args.suffix}_submission.zip"
     if args.dataset == "mind":
-        out = PREDICTIONS_DIR / f"mind_{args.retriever}_submission.zip"
-        generate_mind_predictions(retriever, split_path, total_rows, out)
+        generate_mind_predictions(retriever, split_path, total_rows, out, args.unique_ids)
     else:
-        out = PREDICTIONS_DIR / f"ebnerd_{args.retriever}_submission.zip"
-        generate_ebnerd_predictions(retriever, split_path, total_rows, out)
+        generate_ebnerd_predictions(retriever, split_path, total_rows, out, args.unique_ids)
 
     log.info(f"  Ready to upload: {out}")
