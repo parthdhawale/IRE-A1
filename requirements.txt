@@ -7,13 +7,13 @@ scikit-learn>=1.3
 pyarrow>=14.0
 
 # Retrieval
-rank-bm25>=0.2.2
 faiss-cpu>=1.7.4            # use faiss-gpu on Colab/Kaggle
 
 # Embeddings / NLP
 sentence-transformers>=2.6
 transformers>=4.38
 torch>=2.1
+nltk>=3.8                   # SnowballStemmer (Danish + English) for BM25 tokenization
 
 # HuggingFace datasets
 huggingface_hub>=0.21
