@@ -1,0 +1,364 @@
+% =====================================================================
+%  CS4.406 Assignment 1 -- Design Note
+%  Compile:  pdflatex design_note.tex   (run once; no bibliography)
+%
+%  SCREENSHOTS: place the two leaderboard PNGs at
+%      screenshots/mind_leaderboard.png
+%      screenshots/ebnerd_leaderboard.png
+%  If either file is missing the document still compiles and prints a
+%  visible placeholder in its place, so a missing image can never leave
+%  a silently blank section.
+% =====================================================================
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=15mm,top=14mm,bottom=15mm]{geometry}
+\usepackage{lmodern}      % scalable fonts (microtype needs these)
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+% Deliberately avoids enumitem and titlesec: both are absent from a minimal
+% (BasicTeX) install, and this document is meant to compile there as well as
+% on Overleaf. The list and heading tightening they would provide is done
+% with core LaTeX below instead.
+
+% ---- palette ----
+\definecolor{ink}{HTML}{16233C}
+\definecolor{accent}{HTML}{0E6B6B}
+\definecolor{bad}{HTML}{A52222}
+\definecolor{rule}{HTML}{C8D2DA}
+\definecolor{keybg}{HTML}{FBF7E8}
+\definecolor{keyline}{HTML}{C9A227}
+
+\color{ink}
+
+% ---- compact headings (core \@startsection, in place of titlesec) ----
+\makeatletter
+% {name}{level}{indent}{beforeskip}{afterskip}{style}
+% A negative afterskip makes the heading run in with the following text.
+\renewcommand\section{\@startsection{section}{1}{0pt}%
+  {1.5ex plus .3ex}{0.7ex}{\normalsize\bfseries\color{accent}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{0pt}%
+  {1.1ex plus .2ex}{-0.4em}{\normalfont\bfseries}}
+\makeatother
+
+% ---- tight itemize (in place of enumitem) ----
+\newenvironment{tightitem}
+  {\begin{list}{\textbullet}{%
+     \setlength{\leftmargin}{1.1em}\setlength{\labelwidth}{0.7em}%
+     \setlength{\labelsep}{0.4em}\setlength{\itemsep}{1pt}%
+     \setlength{\parsep}{0pt}\setlength{\topsep}{2pt}%
+     \setlength{\partopsep}{0pt}}}
+  {\end{list}}
+
+\setlength{\parskip}{2.2pt}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{4.5pt}
+\renewcommand{\arraystretch}{1.05}
+\captionsetup{font=small,labelfont=bf,skip=3pt}
+
+% ---- highlighted key-point box ----
+\newcommand{\keybox}[1]{%
+  \par\vspace{2pt}%
+  \noindent\fcolorbox{keyline}{keybg}{%
+    \begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+    \small #1
+    \end{minipage}}%
+  \par\vspace{3pt}}
+
+% ---- graceful image fallback ----
+% \detokenize is required when echoing the path: the filenames contain "_",
+% which is a math-mode character and would otherwise abort the compile with
+% "Missing $ inserted" -- precisely when the image is absent, i.e. exactly
+% when you most need the document to still build.
+\newcommand{\shot}[2]{%
+  \IfFileExists{#1}{\includegraphics[width=\linewidth]{#1}}{%
+    \fbox{\begin{minipage}[c][22mm][c]{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+      \centering\small\textcolor{bad}{\textbf{MISSING IMAGE}}\\[2pt]
+      {\ttfamily\small\detokenize{#1}}\\[2pt]\footnotesize #2
+    \end{minipage}}}}
+
+\pagestyle{empty}
+
+\begin{document}
+
+% =====================================================================
+{\LARGE\bfseries Lexical \& Semantic Retrieval on EB-NeRD and MIND}\\[3pt]
+{\small CS4.406 Information Retrieval \& Extraction --- Assignment 1 design note \quad$\cdot$\quad
+Code: \texttt{github.com/parthdhawale/IRE-A1}}
+\vspace{1.5ex}\hrule\vspace{1.5ex}
+
+% =====================================================================
+\section{What was built}
+
+A single pipeline serving both datasets through one internal schema:
+\texttt{build\_pipeline.py} runs download $\rightarrow$ parse $\rightarrow$ temporal split
+$\rightarrow$ feature store in one command. MIND (English TSV, 130{,}379 articles) and
+EB-NeRD (Danish parquet, 125{,}541 articles) normalise to identical \texttt{articles} and
+\texttt{impressions} frames, so every downstream component is written once. Two retrievers
+sit on top: \textbf{BM25} (own inverted index, $k_1{=}1.5$, $b{=}0.75$, Snowball stemming
+per language) and \textbf{semantic} (MiniLM sentence embeddings, 384-d, FAISS
+inner-product over $L_2$-normalised vectors). A shared harness reports AUC/MRR/nDCG with
+bootstrap CIs, plus diversity/novelty/coverage and slicing.
+
+The task has \emph{two} shapes and they reward opposite things --- a distinction that drove
+most of the analysis below. \textbf{Retrieval} pulls top-$K$ from the whole catalogue
+(recall@$K$). \textbf{Re-ranking} orders the ${\sim}12$--$40$ candidates an impression
+already contains (AUC/MRR/nDCG); this is what Codabench scores.
+
+% =====================================================================
+\section{Results}
+
+\begin{center}\small
+\begin{tabular}{l r r r r}
+\toprule
+\textbf{Metric (val)} & \textbf{MIND BM25} & \textbf{MIND sem.} & \textbf{EB-NeRD BM25} & \textbf{EB-NeRD sem.}\\
+\midrule
+recall@50   & 0.0089 & \textbf{0.0125} & \textbf{0.0042} & 0.0004\\
+recall@200  & 0.0235 & \textbf{0.0289} & \textbf{0.0098} & 0.0015\\
+AUC         & 0.5624 & \textbf{0.6324} & \textcolor{bad}{0.4768} & \textbf{0.5499}\\
+MRR         & 0.2957 & \textbf{0.3383} & 0.2969 & \textbf{0.3425}\\
+nDCG@10     & 0.3232 & \textbf{0.3736} & 0.4139 & \textbf{0.4582}\\
+diversity / coverage & 0.764 / 0.049 & 0.719 / 0.049 & 0.691 / 0.028 & 0.672 / 0.027\\
+\bottomrule
+\end{tabular}
+\end{center}
+{\footnotesize MIND at full scale ($N{=}431{,}511$). EB-NeRD Q4 on a seeded 250{,}000
+sample; semantic cold/warm also run at full scale ($N{=}1{,}997{,}301$) --- see \S5. All
+confidence intervals in \texttt{report.txt}.\par}
+
+\keybox{\textbf{Semantic wins re-ranking on both datasets; BM25 wins retrieval on
+EB-NeRD.} Taking either dataset alone yields a confident, wrong general conclusion about
+which family is better.}
+
+\subsection{(a) EB-NeRD BM25 is reliably worse than random.}
+AUC 0.4768, CI $[0.4755, 0.4781]$ --- the interval excludes 0.5, so this is systematic
+anti-correlation, not noise. Within a ${\sim}12$-candidate list from one publisher on one
+day, the articles sharing most vocabulary with a 267-article history are the long, generic
+ones, which are not what gets clicked. BM25's length normalisation corrects for document
+length but not for \emph{topical genericness}.
+
+\subsection{(b) Longer history helps ranking and hurts retrieval --- every time.}
+Moving from last-10 clicks to full history: MIND BM25 AUC $0.5544\!\rightarrow\!0.5624$,
+MIND semantic $0.6194\!\rightarrow\!0.6324$, EB-NeRD semantic
+$0.5469\!\rightarrow\!0.5574$; but MIND BM25 recall@50 fell $0.0118\!\rightarrow\!0.0089$
+and EB-NeRD semantic recall@50 fell $0.0008\!\rightarrow\!0.0004$. A longer query matches
+more documents at least weakly, diluting a whole-catalogue ranking, while adding usable
+signal when ordering an already-curated list. There is no single correct history length for
+a system doing both.
+
+\subsection{(c) The head/tail effect is not universal.}
+Tail AUC exceeds head in three of four dataset$\times$retriever cells (MIND semantic 0.6566
+vs 0.6300; MIND BM25 0.6034 vs 0.5584; EB-NeRD BM25 0.5218 vs 0.4718) and \emph{reverses}
+in the fourth (EB-NeRD semantic 0.5176 vs 0.5535). Three of four was enough to write it up
+as a general property; the fourth cell refuted it. Note too that MIND tail AUC rises while
+tail MRR \emph{falls} (0.2677 vs 0.3451) --- AUC asks ``can you separate?'', MRR asks ``is
+it at rank 1?''. Tuning on AUC alone would make a system look good on the long tail while
+serving it badly.
+
+% =====================================================================
+\section{Index and tooling choices, measured against alternatives}
+
+MIND corpus $130{,}379\times384$-d. Latency is single-query (serving shape); recall is
+measured \emph{against the exact result} --- i.e.\ does this index return what exhaustive
+search would? \texttt{python -m src.evaluation.benchmark\_index}
+
+\begin{center}\small
+\begin{tabular}{l r r r r r r}
+\toprule
+\textbf{FAISS index} & \textbf{build s} & \textbf{size MB} & \textbf{lat.\ ms} & \textbf{p95} & \textbf{batch q/s} & \textbf{recall@100}\\
+\midrule
+\textbf{IndexFlatIP (shipped)} & 0.07 & 200.3 & 2.704 & 3.67 & 5{,}151 & 1.0000\\
+IVFFlat nprobe=1   & 2.66 & 202.9 & 0.055 & 0.079 & 102{,}699 & \textcolor{bad}{0.3728}\\
+IVFFlat nprobe=8   & 2.24 & 202.9 & 0.094 & 0.120 & 38{,}834  & 0.7550\\
+IVFFlat nprobe=32  & 2.32 & 202.9 & 0.229 & 0.286 & 13{,}653  & 0.9060\\
+HNSW efSearch=32   & 9.31 & 235.8 & 0.290 & 0.455 & 22{,}666  & 0.8312\\
+HNSW efSearch=128  & 8.96 & 235.8 & 0.617 & 0.881 & 11{,}318  & 0.9644\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+IVF at \texttt{nprobe=1} is \textbf{49$\times$ faster} than exact search and discards
+\textbf{63\% of true neighbours} --- the trap in quoting a speedup without its recall.
+Raising \texttt{nprobe} walks that back; HNSW dominates IVF on accuracy at comparable
+latency (96.4\% agreement, 4.4$\times$ faster) for $+35$\,MB and ${\sim}130\times$ the build
+time.
+
+\keybox{\textbf{Why we still ship exact search:} the serving path never queries the index.
+Codabench supplies the candidate list, so submissions go through
+\texttt{score\_candidates()}, which scores the named ${\sim}12$--$40$ articles directly.
+FAISS is exercised only by offline recall@$K$, where 5{,}151 q/s is ample. An approximate
+index would trade 4--63\% of true neighbours for latency we have no use for, and would make
+recall@$K$ a measurement of \emph{approximation error} rather than of retrieval quality. On
+a serving path that did hit the index per request, HNSW \texttt{efSearch=128} is where we
+would go.}
+
+\subsection{Storage.}
+FAISS index 200.3\,MB $\cdot$ embeddings 200.3\,MB $\cdot$ \textbf{BM25 index 32.2\,MB}
+$\cdot$ article catalogue 29.1\,MB. BM25's index is \textbf{6$\times$ smaller}, builds in
+seconds from raw text, and needs no model download or GPU --- the honest argument in its
+favour even though it loses on accuracy here.
+
+% =====================================================================
+\section{Optimising the scoring path}
+
+1{,}000 MIND impressions; mean history 33.8, mean candidates 40.6.
+\texttt{python -m src.evaluation.benchmark\_retrieval}
+
+\begin{center}\small
+\begin{tabular}{l r r l}
+\toprule
+\textbf{Scoring path} & \textbf{ms/impr.} & \textbf{per second} & \textbf{Outcome}\\
+\midrule
+BM25 \texttt{score\_candidates}      & 0.528  & 1{,}894  & shipped\\
+Semantic \texttt{score\_candidates}  & 0.051  & 19{,}608 & shipped\\
+BM25 scoring full corpus             & 14.111 & 71       & rejected --- 27$\times$\\
+Semantic scoring full corpus         & 3.875  & 258      & rejected --- 76$\times$\\
+BM25 without token memoisation       & 2.681  & 373      & rejected --- 5.1$\times$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Targeted vs full-corpus scoring} is the single most expensive available mistake:
+scoring the whole catalogue and reading off the candidates gives identical rankings at
+27$\times$ (BM25) and 76$\times$ (semantic) the cost --- roughly 53 hours versus 2 on
+EB-NeRD's 13.5\,M-impression test set. \textbf{Token memoisation} gives 5.1$\times$ on BM25:
+article tokens never change, but the original code re-tokenised and re-\emph{stemmed} each
+user's entire history on every impression, which measured at 77\% of all work the method did.
+
+\keybox{\textbf{Two optimisations were pessimisations until measured.} Reusing a
+vocabulary-width IDF buffer (to avoid an $O(V)$ allocation per call) made BM25
+\emph{slower}: 0.938\,ms vs 0.717\,ms for plain \texttt{np.zeros}. Vectorising the semantic
+candidate gather likewise went $0.062\rightarrow0.077$\,ms. Both arguments were asymptotic
+and both were wrong: \texttt{np.zeros} is a C-level calloc with lazily-zeroed pages, so the
+memset was nearly free, while the Python loop added to \emph{clear} the buffer ran over
+every unique query term. Rewriting both with NumPy fancy-indexing instead of Python loops
+gave the real win --- \textbf{0.147\,ms} and \textbf{0.034\,ms}, i.e.\ 4.9$\times$ and
+1.8$\times$ over the originals. The gain came from vectorising index construction, not from
+avoiding allocation. Outputs verified identical (BM25 max abs diff 0.0; semantic
+$8.9\mathrm{e}{-}08$ = float32 epsilon).}
+
+\subsection{Throughput at submission scale.}
+MIND 2{,}370{,}727 impressions: semantic 2\,m\,13\,s (17{,}790/s), BM25 8\,m\,38\,s
+(4{,}574/s). EB-NeRD 13{,}536{,}710: semantic ${\approx}18$\,min (${\approx}12{,}400$/s),
+peak RSS flat at 3.8\,GB.
+
+% =====================================================================
+\section{Correctness work that mattered more than tuning}
+
+\begin{tightitem}
+\item \textbf{Wrong dataset bundle.} \texttt{preprocess\_mind()} checked
+\texttt{MINDsmall\_} before \texttt{MINDlarge\_}; both were on disk, so the whole pipeline
+silently ran on MIND-small while the test set comes from MIND-large.
+\item \textbf{Stale embeddings.} The on-disk index still held 125{,}589 MIND-small vectors
+and was being reused against the 130{,}379-article catalogue, so many users' history
+articles were simply absent and their profiles degraded toward random.
+\item \textbf{Unloadable index cache.} Pickling the live \texttt{FastBM25} object recorded
+its class as \texttt{\_\_main\_\_.FastBM25} when built via \texttt{python -m}, so
+\texttt{generate\_preds.py} and \texttt{metrics.py} could not unpickle it at all --- a
+submission run would have crashed. Now persisted as plain arrays.
+\item \textbf{Caches blind to configuration.} Fingerprints covered the article-ID set but
+not \emph{how} data was processed; added \texttt{TOKENIZER\_VERSION} and
+\texttt{EMBEDDING\_MODEL\_VERSION}.
+\end{tightitem}
+
+These, not parameter tuning, produced the leaderboard movement (\S7). \textbf{An unverified
+model swap was rejected:} \texttt{multilingual-e5-base} was implemented with correct
+\texttt{query:}/\texttt{passage:} prefixing, but its download stalled and the comparison
+never completed, so the measured MiniLM configuration stayed rather than shipping an
+unmeasured change.
+
+\subsection{Evaluation methodology.}
+EB-NeRD's val split is ${\sim}2$\,M impressions and a full Q4 pass costs ${\approx}1$\,h per
+retriever, so Q4 there uses a seeded 250{,}000 sample. \textbf{The sampling was validated,
+not assumed:} the identical configuration run both ways gives AUC 0.5499 $[0.5486, 0.5511]$
+at $N{=}250{,}000$ versus 0.5496 $[0.5493, 0.5501]$ at $N{=}1{,}997{,}301$ --- a difference
+of 0.0003, inside both intervals.
+
+\subsection{EB-NeRD has no cold-start slice.}
+Its history file guarantees $\geq5$ clicks per user (\texttt{min\_history\_len = 5}, per the
+provided notebook), so a $<5$-click threshold selects nobody and ``warm'' is identical to
+``all''. Cold-start behaviour is therefore only studiable on MIND, where semantic degrades
+more gracefully than BM25 ($0.6414\!\rightarrow\!0.5730$ vs $0.5673\!\rightarrow\!0.5303$):
+one clicked article still yields a usable 384-d direction, but very few query terms.
+
+% =====================================================================
+\section{Anti-gaming}
+
+\textbf{No feature unavailable at serving time is used.} Inputs are article text and the
+user's prior clicks only. We deliberately exclude popularity,
+\texttt{total\_inviews}/\texttt{pageviews}, \texttt{read\_time}, \texttt{scroll\_percentage}
+and \texttt{next\_*} --- the last of which EB-NeRD itself withholds from its test set
+because they are post-hoc. The ``with versus without'' comparison therefore degenerates:
+there is no ``with'' configuration to report.
+
+\textbf{The behaviour-window test previously did not exist.} The test module's docstring
+claimed to assert that \texttt{click\_history} contains only pre-impression clicks, but no
+test touched \texttt{click\_history}. Two real ones replaced the claim: EB-NeRD is checked
+directly against article publication timestamps (5{,}437{,}152 history entries, 0
+violations); MIND has no publication timestamps at all, so it is checked structurally --- a
+user's history may only grow over time (6{,}288 multi-impression users, 0 violations).
+Suite: 9 passed, 1 correctly skipped.
+
+% =====================================================================
+\section{Leaderboard}
+
+\begin{center}
+\begin{minipage}[t]{0.49\linewidth}\centering
+  \shot{screenshots/mind_leaderboard.png}{Save the MIND submissions table here}
+  {\footnotesize\textbf{MIND} (13967). BM25 $0.5205\!\rightarrow\!0.5873$;
+  semantic $0.5538\!\rightarrow\!\mathbf{0.6497}$.\par}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}\centering
+  \shot{screenshots/ebnerd_leaderboard.png}{Save the EB-NeRD submissions table here}
+  {\footnotesize\textbf{EB-NeRD} (2469). All three submissions remain ``Submitted''
+  with no score, the oldest for four days.\par}
+\end{minipage}
+\end{center}
+
+Online ordering matches offline ordering (semantic $>$ BM25 on both dates), which is the
+useful validation --- the harness ranks the methods the way the hidden test set does, even
+though absolute values differ (offline 0.6324 vs online 0.6497). \textbf{No EB-NeRD
+submission has ever scored}, including one predating any format concern, so we cannot
+attribute that to our file; the evidence points at the evaluation queue. Separately we
+\emph{did} find a real deviation and fixed it: the test set has 13{,}536{,}710 rows but
+13{,}336{,}711 distinct \texttt{impression\_id}s (200{,}000 beyond-accuracy rows all carry
+id 0), and the provided notebook emits one line per \emph{unique id}. A file-size
+explanation was rejected on evidence --- the competition's own reference file is 220\,MB
+against our 230\,MB.
+
+% =====================================================================
+\section{Where it breaks at 10$\times$}
+
+\begin{tightitem}
+\item \textbf{Output materialisation (fixed).} Prediction lines were accumulated in memory
+before writing --- 2.8\,GB for MIND's 2.37\,M lines, ${\sim}15$\,GB projected for EB-NeRD.
+Now streamed straight into the zip; peak RSS is flat in row count.
+\item \textbf{Exact search is the next wall.} Flat search is $O(N)$ per query. At
+10$\times$ the catalogue (1.3\,M articles) recall@$K$ goes from ${\sim}31$\,min to
+${\sim}5$\,h, and the index from 200\,MB to 2\,GB --- past comfortable RAM. This is exactly
+when the \S3 table stops being academic: HNSW at 96.4\% agreement becomes the right trade.
+\item \textbf{BM25 memory is superlinear in practice.} The sparse matrix is built from
+Python lists of \texttt{(row, col, val)} triples before conversion to CSR --- fine at
+130\,K docs, but at 10$\times$ the transient list overhead dominates. Building CSR
+incrementally per row-group would fix it.
+\item \textbf{Mean-pooling degrades as histories lengthen.} Already visible: EB-NeRD's
+267-article histories give recall@50 of 0.0004 versus MIND's 0.0125 at 34. A
+max-similarity variant scored better in ablation (0.6402 vs 0.6325 AUC) but has no single
+query vector and so cannot be an ANN query --- it would force different scoring for
+retrieval and re-ranking, which is why it was not shipped.
+\item \textbf{Single-machine assumption.} Everything is one process; nothing shards. The
+natural split is by impression (embarrassingly parallel) with a shared read-only index.
+\end{tightitem}
+
+\vspace{1ex}\hrule\vspace{0.6ex}
+{\footnotesize All figures reproduce from \texttt{report.txt}, which records the exact
+command per number; sampled figures state size and seed. Benchmarks:
+\texttt{src/evaluation/benchmark\_index.py}, \texttt{benchmark\_retrieval.py}.\par}
+
+\end{document}
