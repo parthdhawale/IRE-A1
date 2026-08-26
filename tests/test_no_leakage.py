@@ -2,18 +2,47 @@
 tests/test_no_leakage.py — Anti-gaming test (Q9).
 
 Asserts that:
-  1. No impression from val/test appears in train (by timestamp)
-  2. click_history only contains articles from before the impression timestamp
+  1. Train/val/test are temporally ordered and disjoint (no impression from
+     val/test appears in train, by id or by timestamp)
+  2. The behaviour-window boundary holds: an impression's click_history never
+     contains a click that happened after that impression. This is the
+     assignment's explicit "no future-click leakage" requirement, and it is a
+     SEPARATE property from (1) — the splits can be perfectly ordered while
+     the features still leak, if history were built by aggregating all of a
+     user's clicks regardless of when the impression occurred.
+
+     It is checked two ways, because the datasets expose different evidence:
+       - EB-NeRD ships published_time for every article, so we assert
+         directly that no article in a history was published after the
+         impression that carries it.
+       - MIND's news.tsv has no publication timestamp at all (published_time
+         is null for all 130,379 articles), so instead we assert the
+         equivalent structural property: for a single user, history can only
+         grow over time. If a future click had leaked backwards into an
+         earlier impression, that impression's history would contain an
+         article missing from a later one, breaking monotonicity.
 
 Run with:
     pytest tests/test_no_leakage.py -v
 """
 
+import itertools
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+
+
+def _as_naive(value) -> pd.Timestamp:
+    """Drop tz info so parquet-read timestamps compare consistently.
+
+    articles.parquet and the impression splits do not agree on tz-awareness,
+    and comparing a tz-aware to a tz-naive Timestamp raises rather than
+    returning False — which would look like a passing test if caught wrongly.
+    """
+    ts = pd.Timestamp(value)
+    return ts.tz_localize(None) if ts.tzinfo is not None else ts
 
 
 def _read_columns(path: Path, columns: list[str]) -> pd.DataFrame:
@@ -96,3 +125,93 @@ def test_splits_are_disjoint(dataset, proc_dir):
 
     assert train_ts.max() < val_ts.min(),  f"[{dataset}] Train and val time ranges overlap!"
     assert val_ts.max()   < test_ts.min(), f"[{dataset}] Val and test time ranges overlap!"
+
+
+# ── Behaviour-window boundary (Q9: "no future-click leakage") ─────────────────
+
+_HISTORY_SAMPLE_ROWS = 20_000
+
+
+@pytest.mark.parametrize("dataset,proc_dir", [
+    ("mind",   Path("data/mind/processed")),
+    ("ebnerd", Path("data/ebnerd/processed")),
+])
+def test_history_articles_predate_impression(dataset, proc_dir):
+    """No article in a click_history was published after its own impression.
+
+    Requires article publication timestamps, which only EB-NeRD provides;
+    MIND is covered by test_history_is_monotone_per_user instead.
+    """
+    if not (proc_dir / "val.parquet").exists():
+        pytest.skip(f"Processed data not found for {dataset}.")
+
+    articles = _read_columns(proc_dir / "articles.parquet", ["article_id", "published_time"])
+    published = {
+        aid: _as_naive(ts)
+        for aid, ts in zip(articles["article_id"], articles["published_time"])
+        if pd.notna(ts)
+    }
+    if not published:
+        pytest.skip(f"{dataset} has no article publication timestamps (MIND's news.tsv omits them).")
+
+    batch = next(
+        pq.ParquetFile(proc_dir / "val.parquet").iter_batches(
+            columns=["timestamp", "click_history"], batch_size=_HISTORY_SAMPLE_ROWS
+        )
+    ).to_pandas()
+
+    violations = checked = 0
+    for impression_ts, history in zip(batch["timestamp"], batch["click_history"]):
+        shown_at = _as_naive(impression_ts)
+        for article_id in history:
+            published_at = published.get(article_id)
+            if published_at is None:
+                continue
+            checked += 1
+            if published_at > shown_at:
+                violations += 1
+
+    assert checked > 0, f"[{dataset}] no history articles had a publication time to check"
+    assert violations == 0, (
+        f"[{dataset}] LEAKAGE: {violations:,} of {checked:,} click_history articles were "
+        f"published AFTER the impression that lists them"
+    )
+
+
+@pytest.mark.parametrize("dataset,proc_dir", [
+    ("mind",   Path("data/mind/processed")),
+    ("ebnerd", Path("data/ebnerd/processed")),
+])
+def test_history_is_monotone_per_user(dataset, proc_dir):
+    """For one user, click_history may only grow as time advances.
+
+    A future click leaking backwards into an earlier impression would make
+    that impression's history contain an article absent from a later one.
+    """
+    if not (proc_dir / "val.parquet").exists():
+        pytest.skip(f"Processed data not found for {dataset}.")
+
+    batch = next(
+        pq.ParquetFile(proc_dir / "val.parquet").iter_batches(
+            columns=["user_id", "timestamp", "click_history"], batch_size=_HISTORY_SAMPLE_ROWS
+        )
+    ).to_pandas().sort_values(["user_id", "timestamp"])
+
+    shrank = users_checked = 0
+    for _, group in itertools.islice(batch.groupby("user_id"), _HISTORY_SAMPLE_ROWS):
+        if len(group) < 2:
+            continue
+        users_checked += 1
+        previous = None
+        for history in group["click_history"]:
+            current = set(history)
+            if previous is not None and not previous.issubset(current):
+                shrank += 1
+                break
+            previous = current
+
+    assert users_checked > 0, f"[{dataset}] no users had multiple impressions to compare"
+    assert shrank == 0, (
+        f"[{dataset}] LEAKAGE: {shrank:,} of {users_checked:,} users had a click_history that "
+        f"lost articles over time — an earlier impression saw clicks a later one did not"
+    )
