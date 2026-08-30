@@ -6,6 +6,25 @@ reproduced here with the command that produced it. Where a figure comes from a
 sample rather than a full split, the sample size and seed are stated inline —
 never silently.
 
+CONTENTS (grouped by topic, so the engineering analysis sits with the other
+measurement sections rather than in strict question order)
+  Q1  Reproducible data pipeline ................ schema, splits, memory model
+  Q2  BM25 lexical retrieval ..................... recall@K
+  Q3  Semantic retrieval ......................... recall@K, lexical vs semantic
+  Q4  Offline evaluation harness ................. AUC/MRR/nDCG, slices, CIs
+  Q6  Engineering analysis ....................... index choice, optimisations
+  Q5  Codabench submission ....................... both leaderboards, offline vs online
+  Q9  Anti-gaming / leakage ...................... serving-time features, tests
+      Reproducibility notes ...................... caching, determinism
+
+  Q6 design note ....... design_note.tex  (pdflatex design_note.tex)
+  Q7 deliverables ...... code + README.md (one-command reproduce) + this file
+                         + ai_usage_log.md; prediction archives are gitignored
+                         by Q8's no-large-files rule and are reproducible from
+                         the documented commands (see README).
+  Q8 git policy ........ github.com/parthdhawale/IRE-A1, commits scoped per
+                         logical change, no file >1MB tracked.
+
 CONFIGURATION UNDER TEST (all numbers below unless stated otherwise)
   MIND     articles 130,379 (MINDlarge_train+dev+test catalogs, deduplicated)
            val split 431,511 impressions (temporal, last-but-one day)
@@ -15,6 +34,55 @@ CONFIGURATION UNDER TEST (all numbers below unless stated otherwise)
            embeddings paraphrase-multilingual-MiniLM-L12-v2, 384d
   Both     BM25 k1=1.5 b=0.75, Snowball stemming (english/danish),
            query and user profile built from the FULL click history.
+
+=====================================================================
+Question 1: Reproducible Data Pipeline
+  python build_pipeline.py --dataset both
+=====================================================================
+
+The single command runs: download -> parse into a unified schema -> temporal
+split -> feature store. Both datasets are normalised to ONE internal schema at
+the edge, so every downstream component (BM25, semantic, eval harness,
+submission generator) contains zero dataset-specific branching:
+
+  articles      article_id, title, abstract, body, category, entities, published_time
+  impressions   impression_id, user_id, timestamp, click_history, candidates, labels
+
+Field mapping is not trivial: EB-NeRD has no "abstract" (its subtitle is used),
+no binary label vector (article_ids_clicked is a list of clicked ids, expanded
+against article_ids_inview), and keeps history in a separate history.parquet
+keyed by user, whereas MIND embeds it inline per row and encodes labels as a
+"-1"/"-0" suffix on each candidate.
+
+--- Split sizes actually produced ---
+                              MIND            EB-NeRD
+  articles                 130,379            125,541
+  train                  1,801,223         20,752,525
+  val                      431,511          1,997,301
+  test                     376,485          1,880,449
+  competition test       2,370,727         13,536,710
+
+TEMPORAL SPLIT, NEVER RANDOM. Cutoffs are anchored to the end of the data:
+  test_cutoff = max(timestamp) - test_days      val_cutoff = test_cutoff - val_days
+  train: t < val_cutoff   val: val_cutoff <= t < test_cutoff   test: t >= test_cutoff
+Anchoring at the END (rather than the start) means the evaluation window is the
+most recent data, which is the closest available proxy for "next week". The
+competition test set is kept entirely OUT of this split — it is unlabeled and
+exists only to generate submissions.
+
+FEATURE STORE. build_article_store / build_user_store / build_embedding_index
+cache the expensive invariants (article features, per-user history, embeddings)
+so retrieval and evaluation never recompute them. See "Reproducibility notes"
+at the end of this file for how staleness is detected.
+
+MEMORY MODEL. The split is the part that does not fit in RAM: EB-NeRD's
+behaviours are 12M+ rows with list-valued columns, and pandas materialises each
+list cell as an individual Python object, so peak memory exceeded 16GB on a
+6.75GB file. Polars scan_parquet -> sink_parquet executes the split as a lazy
+plan in Arrow batches instead, and the user store was ultimately built as a
+manual reduction over parquet row groups into a plain dict — memory
+proportional to unique users only, and predictable regardless of what else is
+running on the machine.
 
 =====================================================================
 Question 2: BM25 Lexical Retrieval
@@ -241,7 +309,7 @@ harness bug — but it does mean cold-start behaviour cannot be studied on
 EB-NeRD at all, only on MIND.
 
 =====================================================================
-ENGINEERING ANALYSIS — index and tooling choices
+Question 6: ENGINEERING ANALYSIS — index and tooling choices
 =====================================================================
 
 --- ANN index: what we ship, and what the alternatives actually cost ---
