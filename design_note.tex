@@ -119,12 +119,12 @@ already contains (AUC/MRR/nDCG); this is what Codabench scores.
 \toprule
 \textbf{Metric (val)} & \textbf{MIND BM25} & \textbf{MIND sem.} & \textbf{EB-NeRD BM25} & \textbf{EB-NeRD sem.}\\
 \midrule
-recall@50   & 0.0089 & \textbf{0.0125} & \textbf{0.0042} & 0.0004\\
-recall@200  & 0.0235 & \textbf{0.0289} & \textbf{0.0098} & 0.0015\\
-AUC         & 0.5624 & \textbf{0.6324} & \textcolor{bad}{0.4768} & \textbf{0.5499}\\
-MRR         & 0.2957 & \textbf{0.3383} & 0.2969 & \textbf{0.3425}\\
-nDCG@10     & 0.3232 & \textbf{0.3736} & 0.4139 & \textbf{0.4582}\\
-diversity / coverage & 0.764 / 0.049 & 0.719 / 0.049 & 0.691 / 0.028 & 0.672 / 0.027\\
+recall@50   & 0.0089 & \textbf{0.0125} & \textbf{0.0021} & 0.0004\\
+recall@200  & 0.0235 & \textbf{0.0289} & \textbf{0.0108} & 0.0015\\
+AUC         & 0.5624 & \textbf{0.6324} & 0.5264 & \textbf{0.5499}\\
+MRR         & 0.2957 & \textbf{0.3383} & 0.3356 & \textbf{0.3425}\\
+nDCG@10     & 0.3232 & \textbf{0.3736} & 0.4494 & \textbf{0.4582}\\
+diversity / coverage & 0.764 / 0.049 & 0.719 / 0.049 & 0.696 / 0.027 & 0.672 / 0.027\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -136,12 +136,39 @@ confidence intervals in \texttt{report.txt}.\par}
 EB-NeRD.} Taking either dataset alone yields a confident, wrong general conclusion about
 which family is better.}
 
-\subsection{(a) EB-NeRD BM25 is reliably worse than random.}
-AUC 0.4768, CI $[0.4755, 0.4781]$ --- the interval excludes 0.5, so this is systematic
-anti-correlation, not noise. Within a ${\sim}12$-candidate list from one publisher on one
-day, the articles sharing most vocabulary with a 267-article history are the long, generic
-ones, which are not what gets clicked. BM25's length normalisation corrects for document
-length but not for \emph{topical genericness}.
+\subsection{(a) BM25 scored below random on EB-NeRD --- diagnosed and fixed.}
+BM25 initially scored AUC 0.4768, CI $[0.4755, 0.4781]$: the interval excludes 0.5, so the
+ranking was systematically \emph{inverted}, not merely weak. Diagnosis: BM25's $b$
+normalises for document \emph{length} but nothing penalises topical \emph{genericness}, so
+indexing EB-NeRD's full article bodies floated long unfocused articles to the top of every
+candidate list --- exactly the ones users do not click. Crossing index contents against
+query length on the fixed 20k sample:
+
+\begin{center}\small
+\begin{tabular}{l l r}
+\toprule
+\textbf{Index contents} & \textbf{Query} & \textbf{AUC}\\
+\midrule
+title\,+\,abstract          & last 50 & \textbf{0.5278}\\
+title\,+\,abstract          & all history & 0.5197\\
+title\,+\,abstract          & last 10 & 0.5170\\
+title\,+\,abstract\,+\,body & last 10 & 0.5016\\
+title\,+\,abstract\,+\,body & last 50 & 0.4950\\
+title\,+\,abstract\,+\,body & all history & \textcolor{bad}{0.4815}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every no-body configuration beats every with-body one; the fix is $+0.046$ and crosses
+above random. (The grid is the 20k ablation sample; re-measured on the 250k evaluation
+sample the shipped configuration reads AUC \textbf{0.5264}, CI $[0.5252, 0.5276]$ --- the
+figure in the results table, and now entirely above 0.5.) Note the optimal query length \emph{flips} with index contents (with bodies,
+shorter won), so tuning the axes separately would have concluded ``shorter is better'' and
+left the retriever below random --- the interaction only appears in the grid. Side effects
+were all favourable: vocabulary $340{,}827 \rightarrow 80{,}873$ terms, index build
+$50\,\mathrm{s} \rightarrow 4\,\mathrm{s}$, scoring $2{,}945 \rightarrow 7{,}930$
+impressions/s. BM25 configuration is consequently \emph{per-dataset}: MIND keeps full
+history (0.5624 vs 0.5544), EB-NeRD caps at 50.
 
 \subsection{(b) Longer history helps ranking and hurts retrieval --- every time.}
 Moving from last-10 clicks to full history: MIND BM25 AUC $0.5544\!\rightarrow\!0.5624$,
@@ -167,10 +194,13 @@ BM25 benefits from the body precisely because a sparse index has \emph{no} lengt
 The result is specific to a 128-token encoder --- a long-context model could reverse it.
 
 \subsection{(d) The head/tail effect is not universal.}
-Tail AUC exceeds head in three of four dataset$\times$retriever cells (MIND semantic 0.6566
-vs 0.6300; MIND BM25 0.6034 vs 0.5584; EB-NeRD BM25 0.5218 vs 0.4718) and \emph{reverses}
-in the fourth (EB-NeRD semantic 0.5176 vs 0.5535). Three of four was enough to write it up
-as a general property; the fourth cell refuted it. Note too that MIND tail AUC rises while
+Tail AUC exceeds head on MIND for both retrievers (semantic 0.6566 vs 0.6300; BM25 0.6034
+vs 0.5584) and \emph{reverses} on EB-NeRD for both (semantic 0.5176 vs 0.5535; BM25 0.5114
+vs 0.5281). More damning still: EB-NeRD BM25 \emph{flipped direction} when we changed only
+which fields entered the index (it previously read tail 0.5218 $>$ head 0.4718) --- same
+formula, parameters, corpus and evaluation. A slice-level effect that reverses under a
+configuration change is not a property of the long tail; it is a property of one model
+fitted one way. Note too that MIND tail AUC rises while
 tail MRR \emph{falls} (0.2677 vs 0.3451) --- AUC asks ``can you separate?'', MRR asks ``is
 it at rank 1?''. Tuning on AUC alone would make a system look good on the long tail while
 serving it badly.
