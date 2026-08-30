@@ -152,7 +152,21 @@ more documents at least weakly, diluting a whole-catalogue ranking, while adding
 signal when ordering an already-curated list. There is no single correct history length for
 a system doing both.
 
-\subsection{(c) The head/tail effect is not universal.}
+\subsection{(c) More text is not more signal under a fixed token budget.}
+EB-NeRD is the only dataset with full body text, and the semantic retriever embeds only
+title\,+\,abstract while BM25 indexes the body too. Tested directly (same corpus, same
+model, only the embedded string varying): adding the body moved AUC
+$0.5574 \rightarrow 0.5514$ ($-0.0060$) while costing $3.4\times$ the encoding time
+(186\,s $\rightarrow$ 635\,s) --- rejected on both axes. The mechanism is capacity, not
+content: the encoder truncates at \textbf{128 tokens} and title\,+\,abstract already uses
+${\sim}40$, so appending a 2{,}259-character mean body embeds roughly its first 80 tokens
+and discards ${\sim}80\%$. Title and abstract are \emph{editorially compressed} summaries
+and so the highest information density per token in the document; spending a fixed budget
+on the formulaic lede is a net loss. This also sharpens the lexical/semantic contrast:
+BM25 benefits from the body precisely because a sparse index has \emph{no} length budget.
+The result is specific to a 128-token encoder --- a long-context model could reverse it.
+
+\subsection{(d) The head/tail effect is not universal.}
 Tail AUC exceeds head in three of four dataset$\times$retriever cells (MIND semantic 0.6566
 vs 0.6300; MIND BM25 0.6034 vs 0.5584; EB-NeRD BM25 0.5218 vs 0.4718) and \emph{reverses}
 in the fourth (EB-NeRD semantic 0.5176 vs 0.5535). Three of four was enough to write it up

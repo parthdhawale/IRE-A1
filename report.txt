@@ -290,6 +290,42 @@ candidates but far too diffuse to locate one specific article in a
 vocabulary and so retrieves better, even though its ranking of an already-
 curated list is anti-correlated with clicks.
 
+ABLATION — should the embedded text include the article BODY? (rejected)
+EB-NeRD is the only dataset with full body text, and the semantic retriever
+embeds only title+abstract while BM25 indexes title+abstract+body. Tested
+directly on the fixed 20,000-impression sample, same corpus, same model, only
+the embedded string varying:
+
+  condition                     AUC       encode time (125,541 articles)
+  title + abstract (shipped)    0.5574    186s
+  title + abstract + body       0.5514    635s
+  delta                        -0.0060    3.4x slower
+
+Rejected on both axes: it costs 3.4x the encoding time to LOSE 0.006 AUC.
+
+WHY, and why this is not merely a null result. The encoder's max_seq_length is
+128 tokens and title+abstract already consumes ~40 (mean 148 characters), so
+appending a 2,259-character mean body does not embed the article — it embeds
+roughly its first 80 tokens and discards ~80% of it. What actually got added
+was an arbitrary truncation of the lede, and Danish news ledes are formulaic
+(attribution, dateline, scene-setting), so they dilute the topical signal that
+the headline and standfirst carry densely without adding proportionate
+information.
+
+The generalisable claim: MORE TEXT IS NOT MORE SIGNAL WHEN THE ENCODER HAS A
+FIXED TOKEN BUDGET. Title and abstract are editorially compressed summaries and
+therefore the highest information density per token available in the document;
+spending a fixed budget on lower-density text is a net loss. This is a
+statement about matching input to model capacity, not about news.
+
+It also sharpens the lexical/semantic contrast already reported here: BM25 uses
+the body and benefits from it, because a sparse inverted index has no length
+budget — every term is indexed regardless of document length. The two families
+have genuinely different appetites for text, and this measures the difference
+rather than assuming it. Note the corollary: this result is specific to a
+128-token encoder. A long-context embedding model could plausibly reverse it,
+which is the obvious follow-up if more compute were available.
+
 FULL-HISTORY TRADE-OFF, CONFIRMED ON BOTH DATASETS AND BOTH RETRIEVERS:
 switching from last-10 to the full click history improved re-ranking every
 time (MIND BM25 0.5544->0.5624, MIND semantic 0.6194->0.6324, EB-NeRD
