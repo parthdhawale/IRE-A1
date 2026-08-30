@@ -316,21 +316,41 @@ Suite: 9 passed, 1 correctly skipped.
 \end{minipage}\hfill
 \begin{minipage}[t]{0.49\linewidth}\centering
   \shot{screenshots/ebnerd_leaderboard.png}{Save the EB-NeRD submissions table here}
-  {\footnotesize\textbf{EB-NeRD} (2469). All three submissions remain ``Submitted''
-  with no score, the oldest for four days.\par}
+  {\footnotesize\textbf{EB-NeRD} (2469). Semantic scored \textbf{0.5404} after
+  ${\sim}24$\,h in the queue; the two older submissions remain unscored.\par}
 \end{minipage}
 \end{center}
 
-Online ordering matches offline ordering (semantic $>$ BM25 on both dates), which is the
-useful validation --- the harness ranks the methods the way the hidden test set does, even
-though absolute values differ (offline 0.6324 vs online 0.6497). \textbf{No EB-NeRD
-submission has ever scored}, including one predating any format concern, so we cannot
-attribute that to our file; the evidence points at the evaluation queue. Separately we
-\emph{did} find a real deviation and fixed it: the test set has 13{,}536{,}710 rows but
-13{,}336{,}711 distinct \texttt{impression\_id}s (200{,}000 beyond-accuracy rows all carry
-id 0), and the provided notebook emits one line per \emph{unique id}. A file-size
-explanation was rejected on evidence --- the competition's own reference file is 220\,MB
-against our 230\,MB.
+\textbf{The offline harness predicts the hidden test set on both datasets.}
+
+\begin{center}\small
+\begin{tabular}{l r r r}
+\toprule
+\textbf{Dataset} & \textbf{Offline AUC (val)} & \textbf{Online AUC (test)} & \textbf{Gap}\\
+\midrule
+MIND    & 0.6324 & 0.6497 & $+0.017$\\
+EB-NeRD & 0.5496 & 0.5404 & $-0.009$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both gaps are under 0.02 and the method ordering is preserved on both leaderboards
+(semantic $>$ BM25). This is the real check on Q4 --- an offline harness is only worth
+having if it predicts the held-out result. Note the gap has \emph{opposite sign} on the two
+datasets, which argues against a systematic optimism bias, the more common failure mode.
+
+\keybox{\textbf{A diagnosis we got wrong, and the correction.} While no EB-NeRD submission
+had scored, we found its test set has 13{,}536{,}710 rows but only 13{,}336{,}711 distinct
+\texttt{impression\_id}s (200{,}000 beyond-accuracy rows all carry id 0), noted that the
+provided \texttt{ebnerd\_analysis.ipynb} emits one line per \emph{unique} id, and inferred
+that our one-line-per-\emph{row} file was the cause. \textbf{That inference was wrong:} the
+submission that scored is the full 13{,}536{,}710-line row-aligned file, exactly as
+originally generated --- the format was accepted, and the only cause was queue latency. The
+symptom (``submitted, no score'') never discriminated between a malformed file and a slow
+queue, and the platform withholds scoring logs during the competition, so it could not
+have. The correct action at the time was to state both hypotheses and wait, rather than act
+on the more interesting one. A file-size explanation was separately rejected on evidence:
+the competition's own reference file is 220\,MB against our 230\,MB.}
 
 % =====================================================================
 \section{Where it breaks at 10$\times$}

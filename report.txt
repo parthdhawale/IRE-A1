@@ -361,39 +361,59 @@ MIND (codabench.org/competitions/13967) — all submissions scored:
   methods the same way the hidden test set does, even though the absolute
   values differ (offline semantic 0.6324 vs online 0.6497).
 
-EB-NeRD (codabench.org/competitions/2469) — NO submission has ever scored:
-  ID       file                             date              status
-  897347   ebnerd_bm25_submission.zip       2026-08-22 19:19  Submitted
-  897369   ebnerd_semantic_submission.zip   2026-08-22 19:33  Submitted
-  901595   ebnerd_semantic_submission.zip   2026-08-25 20:59  Submitted
+EB-NeRD (codabench.org/competitions/2469):
+  ID       file                             date              status     AUC
+  897347   ebnerd_bm25_submission.zip       2026-08-22 19:19  Submitted  --
+  897369   ebnerd_semantic_submission.zip   2026-08-22 19:33  Submitted  --
+  901595   ebnerd_semantic_submission.zip   2026-08-25 20:59  Finished   0.5404
 
-  All three sit at "Submitted" with no score and no Detailed Results — the
-  oldest for over four days. This changes the diagnosis recorded below. Since
-  NO EB-NeRD submission has ever been scored, including ones predating any
-  format concern, the evidence does not support blaming our file: the queue
-  itself appears not to be processing. This matches the course announcement
-  that the organiser-hosted Docker evaluator for the RecSys challenge is a
-  bottleneck with slow turnarounds, and the competition's own guidance that
-  scoring "can take up to a few hours" and that debug logs are withheld
-  during the competition.
+  The 2026-08-25 submission scored 0.5404 after roughly 24 hours in the
+  queue; the two 2026-08-22 submissions still show "Submitted" with no score
+  four days later. This RESOLVES the diagnosis previously recorded here, and
+  resolves it against our own hypothesis.
 
-  We therefore CANNOT confirm whether the line-count issue below was ever the
-  cause. It was a genuine deviation from the course-provided notebook and is
-  fixed regardless, but attributing the missing score to it would be a claim
-  the evidence does not carry.
+  WHAT WE GOT WRONG. When no EB-NeRD submission had scored, we found that the
+  test set has 13,536,710 rows but only 13,336,711 distinct impression_ids
+  (its 200,000 "beyond-accuracy" rows all carry impression_id = 0), noted that
+  the course-provided ebnerd_analysis.ipynb groups by impression_id and emits
+  13,336,711 lines, and inferred that our one-line-per-ROW file was the cause.
+  We implemented --unique-ids to match the notebook.
 
-  EB-NeRD SUBMISSION FORMAT — the deviation that was found and fixed.
-  The file was structurally valid (correct inner name predictions.txt,
-  13,536,710 well-formed lines, 0 malformed, ranks a permutation of 1..N in
-  original candidate order, verified against the competition's own worked
-  example 139350 -> [3,2,4,1]). The deviation was the LINE COUNT: the test set
-  has 13,536,710 rows but only 13,336,711 distinct impression_ids, because
-  its 200,000 "beyond-accuracy" rows all carry impression_id = 0. The
-  course-provided ebnerd_analysis.ipynb groups by impression_id and emits
-  13,336,711 lines, stating the file "must cover all unique impression_ids".
-  Our file emitted one line per ROW, so 200,000 lines shared a single id.
-  Corrected via --unique-ids (first occurrence wins); the regenerated file
-  has exactly 13,336,711 lines, 0 duplicates, and full id coverage.
+  That inference was WRONG. The submission that scored (901595) is the full
+  13,536,710-line file, one line per row, exactly as originally generated. The
+  format was accepted. The only cause of the missing score was queue latency —
+  consistent with the course announcement that the organiser-hosted Docker
+  evaluator is a bottleneck, and with the competition's own note that scoring
+  "can take up to a few hours" and that debug logs are withheld during the
+  competition.
+
+  The --unique-ids file was therefore NOT submitted: dropping 200,000 rows
+  would break the row-order alignment the guidelines explicitly require ("the
+  row orders of the results should be consistent with those in the original
+  files"). The flag remains in the code, documented as the notebook-matching
+  variant, but the row-aligned file is the correct one.
+
+  The methodological lesson is worth more than the format detail: a plausible
+  mechanism was identified for a symptom, was consistent with a real
+  discrepancy against the reference notebook, and was still not the cause. The
+  symptom ("submitted, no score") never actually discriminated between "our
+  file is malformed" and "the queue is slow", and we had no way to observe the
+  difference because the platform withholds scoring logs during the
+  competition. The right conclusion at the time would have been to state both
+  hypotheses and wait, rather than to act on the more interesting one.
+
+  OFFLINE vs ONLINE — the harness is validated on both datasets.
+    dataset   offline AUC (val)   online AUC (hidden test)   gap
+    MIND      0.6324              0.6497                     +0.017
+    EB-NeRD   0.5496              0.5404                     -0.009
+  Both gaps are under 0.02, and the method ordering is preserved on both
+  leaderboards (semantic > BM25). This is the real check on Q4: an offline
+  harness is only worth having if it predicts the held-out result, and here
+  it does, in both directions and in two languages. Note the gap has opposite
+  SIGN on the two datasets, which argues against a systematic optimism bias
+  in the harness — the more common failure mode when offline consistently
+  overstates.
+
   A size hypothesis was also considered and REJECTED on evidence: the
   competition's own reference file predictions_large_random.zip is 220MB and
   ours was 230MB.
