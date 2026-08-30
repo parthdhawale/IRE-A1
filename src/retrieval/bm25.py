@@ -242,21 +242,61 @@ class FastBM25:
 # silently keep serving an old, non-stemmed index whenever the article
 # catalog itself happened not to have changed (same bug class as the
 # article-set staleness check below, just for tokenization instead of data).
-TOKENIZER_VERSION = "stemmed-v1"
+_UNSET = object()
 
-# How many of a user's most recent clicks to concatenate into their BM25
-# query. None = the entire click history.
+TOKENIZER_VERSION = "stemmed-v2-perdataset-fields"
+
+# Which article fields go into the INDEX, per dataset.
 #
-# This was 10, which measurably threw away signal: on a fixed 20K-impression
-# MIND val sample, querying with the full history scored AUC 0.5640 vs 0.5544
-# for the last 10 (+0.010). Last-30 and last-50 both landed at 0.5635, so the
-# gain saturates but never reverses — matching the same experiment on the
-# semantic side (see USER_HISTORY_LIMIT in semantic.py).
+# MIND has no body at all (news.tsv omits it — licensing), so listing it there
+# is a harmless no-op that keeps the two datasets on one code path.
+#
+# EB-NeRD deliberately EXCLUDES the body, which is measured, not assumed. On a
+# fixed 20,000-impression EB-NeRD val sample, crossing index contents against
+# query length (see report.txt):
+#
+#     index            query      AUC
+#     no body          last50     0.5278   <- shipped
+#     no body          ALL        0.5197
+#     no body          last10     0.5170
+#     title+abs+body   last10     0.5016
+#     title+abs+body   last50     0.4950
+#     title+abs+body   ALL        0.4815   <- previous config, BELOW random
+#
+# Every no-body configuration beats every with-body configuration. Indexing the
+# body also inflated the vocabulary from 80,873 to 340,827 terms — ~260k mostly
+# rare terms that add spurious matches. The mechanism: BM25's b parameter
+# normalises for document LENGTH but not for topical GENERICNESS, so a long
+# unfocused body overlaps with any long history and ranks high without being
+# what the user clicks. Removing it moves EB-NeRD BM25 from reliably worse than
+# random to above it.
+INDEX_FIELDS = {
+    "mind":   ("title", "abstract", "body"),
+    "ebnerd": ("title", "abstract"),
+}
+
+# How many of a user's most recent clicks to concatenate into the query.
+# None = the entire click history. Per-dataset because the measured optimum
+# genuinely differs, and the two axes interact:
+#
+#   MIND     full history 0.5624 vs last-10 0.5544 — monotone, never reverses.
+#   EB-NeRD  last-50 0.5278 vs full 0.5197 vs last-10 0.5170 (no-body index).
+#            Note the optimum FLIPS with the index contents: on the old
+#            with-body index, shorter was better (last-10 0.5016 beat ALL
+#            0.4815). Testing the two axes as a grid rather than separately is
+#            what exposed that.
+#
+# EB-NeRD's histories average 267 articles vs MIND's 34, so "all history" means
+# something very different on each dataset — a ~8,000-token query that matches
+# nearly the whole corpus, versus a focused one.
 #
 # Note the asymmetric cost documented in _build_query_tokens: longer queries
 # are cheap in score_candidates() but expensive in evaluate()'s full-corpus
 # recall@K search, so recall@K should be re-measured after changing this.
-QUERY_HISTORY_LIMIT: int | None = None
+QUERY_HISTORY_LIMIT: dict[str, int | None] = {
+    "mind":   None,
+    "ebnerd": 50,
+}
 
 
 class BM25Retriever:
@@ -325,10 +365,10 @@ class BM25Retriever:
         self._corpus_id_to_idx = {aid: i for i, aid in enumerate(self.corpus_ids)}
 
         log.info(f"  Building BM25 index over {len(self.corpus_ids):,} articles...")
-        corpus_tokens = [
-            tokenize(f"{row['title']} {row['abstract']} {row['body']}", stemmer=self._stemmer)
-            for _, row in articles.iterrows()
-        ]
+        fields = INDEX_FIELDS[self.dataset]
+        log.info(f"  Indexing fields: {', '.join(fields)}")
+        field_text = articles[list(fields)].fillna("").agg(" ".join, axis=1)
+        corpus_tokens = [tokenize(t, stemmer=self._stemmer) for t in field_text]
 
         self.bm25 = FastBM25(corpus_tokens)
 
@@ -350,7 +390,7 @@ class BM25Retriever:
         self,
         click_history: list[str],
         articles_lookup: dict,
-        max_recent: int | None = QUERY_HISTORY_LIMIT,
+        max_recent: int | None | object = _UNSET,
     ) -> list[str]:
         """Concatenate title + abstract of the user's clicked articles into
         the query (assignment spec: "e.g., concatenate titles of recently
@@ -367,6 +407,8 @@ class BM25Retriever:
         Danish articles was measured to make every query's score row ~95%
         dense — see ai_usage_log.md. Validate recall@K changes to this method
         on a *sample* of queries there, not the full 2M-query val set."""
+        if max_recent is _UNSET:
+            max_recent = QUERY_HISTORY_LIMIT[self.dataset]
         recent = click_history if max_recent is None else click_history[-max_recent:]
         tokens: list[str] = []
         for aid in recent:
