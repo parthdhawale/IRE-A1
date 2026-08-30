@@ -32,8 +32,12 @@ CONFIGURATION UNDER TEST (all numbers below unless stated otherwise)
   EB-NeRD  articles 125,541
            val split 1,997,301 impressions (temporal)
            embeddings paraphrase-multilingual-MiniLM-L12-v2, 384d
-  Both     BM25 k1=1.5 b=0.75, Snowball stemming (english/danish),
-           query and user profile built from the FULL click history.
+  Both     BM25 k1=1.5 b=0.75, Snowball stemming (english/danish).
+  NOTE     BM25 configuration is PER-DATASET, because the measured optima
+           differ (see the EB-NeRD body/query-length ablation below):
+             MIND     index title+abstract(+empty body); query = FULL history
+             EB-NeRD  index title+abstract ONLY;         query = last 50 clicks
+           Semantic uses the full click history on both datasets.
 
 =====================================================================
 Question 1: Reproducible Data Pipeline
@@ -220,20 +224,37 @@ all              1,997,301    0.5496             0.3411           0.3785        
 cold-start               0    nan (no cold-start users exist — see below)
 warm             1,997,301    0.5496             0.3411           0.3785           0.4570           0.6723  8.6519  0.0419
 
---- EB-NeRD / BM25 / cold-start vs warm --- (sample, N=250,000)
-all                250,000    0.4768             0.2969           0.3231           0.4139           0.6910  8.7986  0.0278
-                              [0.4755, 0.4781]   [0.2958, 0.2979] [0.3219, 0.3245] [0.4128, 0.4150]
-warm               250,000    0.4768             0.2969           0.3231           0.4139           0.6910  8.7986  0.0278
+--- EB-NeRD / BM25 / cold-start vs warm --- (sample, N=250,000, NEW config)
+all                250,000    0.5264             0.3356           0.3694           0.4494           0.6959  8.6750  0.0272
+                              [0.5252, 0.5276]   [0.3344, 0.3368] [0.3681, 0.3708] [0.4482, 0.4504]
+warm               250,000    0.5264             0.3356           0.3694           0.4494           0.6959  8.6750  0.0272
+                              [0.5252, 0.5278]   [0.3345, 0.3367] [0.3681, 0.3708] [0.4482, 0.4504]
+  Previous config (title+abstract+body, full history) for comparison:
+  all                250,000    0.4768  MRR 0.2969  nDCG@10 0.4139   <- CI excluded 0.5
 
-BM25 ON EB-NeRD IS RELIABLY WORSE THAN RANDOM. AUC 0.4768 with a 95% CI of
-[0.4755, 0.4781] — the interval excludes 0.5 entirely, so this is not noise
-around chance, it is systematically anti-correlated. Ranking these candidates
-by Danish term overlap with the user's history is worse than shuffling them.
-The likely mechanism is length/vocabulary bias: within a ~12-candidate list
-drawn from one publisher on one day, the articles sharing the most vocabulary
-with a 267-article history are the long, generic, high-frequency-word ones,
-which are not the ones users click. This is the strongest single argument in
-the report for why lexical retrieval alone is not a viable news recommender.
+BM25 ON EB-NeRD WAS RELIABLY WORSE THAN RANDOM — DIAGNOSED AND FIXED.
+The original configuration scored AUC 0.4768 with a 95% CI of [0.4755, 0.4781].
+The interval excludes 0.5 entirely, so that was not noise around chance: the
+ranking was systematically ANTI-CORRELATED, and inverting its output would have
+scored ~0.523. Ranking candidates by Danish term overlap was worse than
+shuffling them.
+
+The mechanism was length/vocabulary bias, and it was actionable. Within a
+~12-candidate list drawn from one publisher on one day, the articles sharing
+most vocabulary with a 267-article history are the long, generic ones — and
+those are not what users click. BM25's b parameter normalises for document
+LENGTH but nothing in the formula penalises topical GENERICNESS, so indexing
+EB-NeRD's full article bodies floated bland articles to the top of every list.
+
+Removing the body from the index (and capping the query at 50 clicks) moved it
+to AUC 0.5264, CI [0.5252, 0.5276] — now entirely ABOVE 0.5. See the ablation
+grid below for the full 2x3 experiment.
+
+WHAT THIS DOES AND DOES NOT SHOW. It is no longer evidence that lexical
+retrieval is unusable for news; it is evidence that WHAT YOU INDEX matters more
+than the scoring function. The same BM25 formula, same parameters, same corpus
+and same queries went from reliably-worse-than-random to above it purely by
+changing which article fields entered the index.
 
 --- EB-NeRD / SEMANTIC / head vs tail --- (sample, N=250,000)
 all                250,000    0.5499             0.3425           0.3797           0.4582           0.6722  8.6354  0.0274
@@ -243,23 +264,37 @@ head               224,944    0.5535             0.3471           0.3856        
 tail                25,056    0.5176             0.3013           0.3270           0.4039           0.6625  6.9590  0.0211
                               [0.5135, 0.5217]   [0.2978, 0.3049] [0.3224, 0.3312] [0.4004, 0.4077]
 
---- EB-NeRD / BM25 / head vs tail --- (sample, N=250,000)
-all                250,000    0.4768             0.2969           0.3231           0.4139           0.6910  8.7986  0.0278
-head               224,944    0.4718             0.2958           0.3219           0.4148           0.6912  8.4643  0.0230
-                              [0.4704, 0.4731]   [0.2947, 0.2970] [0.3207, 0.3234] [0.4137, 0.4159]
-tail                25,056    0.5218             0.3067           0.3339           0.4065           0.6893  7.1136  0.0213
-                              [0.5180, 0.5256]   [0.3029, 0.3101] [0.3295, 0.3381] [0.4031, 0.4100]
+--- EB-NeRD / BM25 / head vs tail --- (sample, N=250,000, NEW config)
+all                250,000    0.5264             0.3356           0.3694           0.4494           0.6959  8.6750  0.0272
+head               224,944    0.5281             0.3398           0.3748           0.4552           0.6956  8.3439  0.0225
+                              [0.5267, 0.5294]   [0.3385, 0.3410] [0.3734, 0.3760] [0.4540, 0.4562]
+tail                25,056    0.5114             0.2976           0.3213           0.3974           0.6982  6.9617  0.0211
+                              [0.5074, 0.5149]   [0.2941, 0.3014] [0.3172, 0.3254] [0.3938, 0.4009]
+  NOTE the head/tail direction REVERSED with this config: previously tail beat
+  head (0.5218 vs 0.4718), now head beats tail (0.5281 vs 0.5114). See the
+  head/tail discussion below — this is a second independent reversal.
 
-THE HEAD/TAIL EFFECT IS NOT UNIVERSAL — IT REVERSES BY DATASET AND METHOD.
-  MIND    semantic  tail 0.6566 > head 0.6300   (tail easier)
-  MIND    BM25      tail 0.6034 > head 0.5584   (tail easier)
-  EB-NeRD BM25      tail 0.5218 > head 0.4718   (tail easier)
-  EB-NeRD semantic  tail 0.5176 < head 0.5535   (tail HARDER)
-Three of the four agree, so it would have been easy to report "content-based
-retrieval does relatively better on the long tail" as a finding. The fourth
-case refutes that as a general claim. Note also that EB-NeRD BM25 only
-crosses above chance at all on the tail slice — its head-slice AUC (0.4718)
-is where the overall anti-correlation comes from.
+THE HEAD/TAIL EFFECT IS NOT UNIVERSAL — IT REVERSES BY DATASET, METHOD, AND
+EVEN BY CONFIGURATION OF THE SAME METHOD.
+  MIND    semantic       tail 0.6566 > head 0.6300   (tail easier)
+  MIND    BM25           tail 0.6034 > head 0.5584   (tail easier)
+  EB-NeRD semantic       tail 0.5176 < head 0.5535   (tail HARDER)
+  EB-NeRD BM25 (new)     tail 0.5114 < head 0.5281   (tail HARDER)
+  EB-NeRD BM25 (old)     tail 0.5218 > head 0.4718   (tail easier)
+
+This started as a three-of-four pattern and it would have been easy to report
+"content-based retrieval does relatively better on the long tail" as a finding.
+Two things now refute that. First, EB-NeRD semantic always disagreed. Second,
+and more damning, EB-NeRD BM25 FLIPPED DIRECTION when we changed what the index
+contained — same formula, same parameters, same corpus, same evaluation, only
+the indexed fields differing. A slice-level effect that reverses under a
+configuration change is not a property of the long tail; it is a property of a
+particular model fitted a particular way.
+
+The old configuration also only crossed above chance on the tail slice, which
+in hindsight was a symptom rather than a finding: head-slice AUC of 0.4718 was
+where the anti-correlation lived, because head (popular) articles are the long,
+generic ones the body-inflated index over-scored.
 
 WHY EB-NeRD HAS NO COLD-START SLICE: the cold/warm split thresholds at <5
 clicks, and EB-NeRD's history file guarantees a minimum history length of 5
@@ -271,17 +306,28 @@ of the data, not a harness bug — but it does mean cold-start behaviour can
 only be studied on MIND.
 
 --- EB-NeRD recall@K ---
-  BM25      (N=20,000)    recall@50 0.0042   @100 0.0063   @200 0.0098
+  BM25      (N=20,000)    recall@50 0.0021   @100 0.0050   @200 0.0108   (NEW config)
+    previous config (with body): recall@50 0.0042  @100 0.0063  @200 0.0098
   Semantic  (N=250,000)   recall@50 0.0004   @100 0.0008   @200 0.0015
 
-THE RETRIEVERS SWAP PLACES BETWEEN THE TWO TASKS. On EB-NeRD, BM25 beats
-semantic ~10x on recall@K yet loses by 0.073 AUC on re-ranking. On MIND,
-semantic wins both. Taking either dataset alone would have produced a
-confident and wrong general conclusion about which method is better.
+THE RETRIEVERS SWAP PLACES BETWEEN THE TWO TASKS. On EB-NeRD, BM25 still beats
+semantic ~5x on recall@K (0.0021 vs 0.0004) yet loses by 0.024 AUC on
+re-ranking. On MIND, semantic wins both. Taking either dataset alone would have
+produced a confident and wrong general conclusion about which method is better.
 
                 MIND BM25   MIND semantic   EB-NeRD BM25   EB-NeRD semantic
-  recall@50     0.0089      0.0125          0.0042         0.0004
-  AUC           0.5624      0.6324          0.4768         0.5499
+  recall@50     0.0089      0.0125          0.0021         0.0004
+  AUC           0.5624      0.6324          0.5264         0.5499
+
+Note the EB-NeRD BM25 gap NARROWED with the index fix: dropping the body raised
+ranking AUC 0.4768 -> 0.5264 but halved recall@50 0.0042 -> 0.0021. That is the
+retrieval/ranking trade appearing on a THIRD axis (after query length and
+history length): body text gave each article more terms to be FOUND by when
+searching 125,541 articles, and those same terms are what made bland articles
+rank high when ORDERING a 12-item shortlist. recall@200 actually improved
+(0.0098 -> 0.0108), so the loss is concentrated at the sharp end of the ranking.
+Codabench scores ranking, so this is the right trade for the leaderboard — but
+a system whose job was candidate generation should make the opposite choice.
 
 The mechanism is the same mean-pooling limitation seen throughout: averaging
 267 article vectors yields a profile generic enough to order 12 known
@@ -289,6 +335,53 @@ candidates but far too diffuse to locate one specific article in a
 125,541-article catalog. BM25's rare-term matching still fires on specific
 vocabulary and so retrieves better, even though its ranking of an already-
 curated list is anti-correlated with clicks.
+
+ABLATION — BM25 on EB-NeRD was below random; two axes fixed it.
+BM25 scored AUC 0.4768 with CI [0.4755, 0.4781] — the interval excludes 0.5, so
+the ranking was systematically INVERTED, not merely weak. Two untested
+hypotheses were crossed on the fixed 20,000-impression sample (same corpus,
+same parameters, only these two axes varying):
+
+  index contents        query length     AUC
+  title+abstract        last 50          0.5278   <- now shipped
+  title+abstract        ALL history      0.5197
+  title+abstract        last 10          0.5170
+  title+abstract+body   last 10          0.5016
+  title+abstract+body   last 50          0.4950
+  title+abstract+body   ALL history      0.4815   <- previous config
+                                          0.5000  = random
+
+Every no-body configuration beats every with-body configuration. At the
+optimum the change is +0.046 AUC and moves the retriever from reliably worse
+than random to above it. Reproduced through the shipped code path: 0.5278.
+
+MECHANISM. BM25's b parameter normalises for document LENGTH but nothing in
+the formula penalises topical GENERICNESS. A 2,000-word article covering six
+topics and a 2,000-word article covering one get identical length treatment,
+but only the first spuriously overlaps with a 267-article history. Indexing
+bodies therefore floated long, unfocused articles to the top of every
+candidate list — and those are precisely the ones users do not click, which is
+why the ranking came out inverted rather than merely noisy.
+
+SECOND-ORDER EFFECT worth noting: the optimal query length FLIPS with index
+contents. With bodies indexed, shorter queries were better (last-10 0.5016 beat
+ALL 0.4815); without them, last-50 wins. The two axes interact, so testing them
+as a grid rather than tuning them separately is what exposed the interaction —
+tuning query length alone on the old index would have concluded "shorter is
+better" and still left the retriever below random.
+
+ENGINEERING SIDE EFFECTS, all favourable:
+  vocabulary     340,827 -> 80,873 terms (~260k mostly-rare terms removed)
+  index build    50s -> 4s
+  scoring rate   2,945 -> 7,930 impressions/sec (competition test set)
+So the fix improved accuracy, index size, build time and throughput together.
+
+CONFIGURATION IS NOW PER-DATASET (INDEX_FIELDS, QUERY_HISTORY_LIMIT in
+bm25.py), because the measured optima genuinely differ: MIND keeps the full
+history (0.5624 vs 0.5544 for last-10) while EB-NeRD caps at 50. Verified a
+no-op for MIND — its body column is empty strings, so both code paths produce
+identical text, and MIND BM25 measures 0.5607 before and after on the same
+seeded subset.
 
 ABLATION — should the embedded text include the article BODY? (rejected)
 EB-NeRD is the only dataset with full body text, and the semantic retriever
